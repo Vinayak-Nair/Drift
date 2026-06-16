@@ -1,4 +1,5 @@
 import AppKit
+import DriftKit
 // Note: on the interim-whisper-cpp branch everything compiles as one swiftc
 // module, so DriftKit types (Settings) are visible without an import. On main,
 // this file imports DriftKit.

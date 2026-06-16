@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioUnit
+import CoreAudio
 
 /// Captures microphone audio and returns 16 kHz mono Float samples, the format
 /// WhisperKit's `transcribe(audioArray:)` expects. No temp files involved.
@@ -10,13 +12,16 @@ public final class Recorder {
     private var samples: [Float] = []
     private let targetSampleRate: Double = 16_000
     private let lock = NSLock()
+    private let settings: Settings
 
     public private(set) var isRecording = false
 
     /// Called on the main thread with the live mic level (0...1) while recording.
     public var onLevel: ((Float) -> Void)?
 
-    public init() {}
+    public init(settings: Settings = .shared) {
+        self.settings = settings
+    }
 
     /// Begins capture. Throws if the audio engine can't start (e.g. mic denied).
     public func start() throws {
@@ -24,6 +29,7 @@ public final class Recorder {
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
         let input = engine.inputNode
+        try applySelectedInputDevice(to: input)
         let inputFormat = input.outputFormat(forBus: 0)
 
         guard let outputFormat = AVAudioFormat(
@@ -92,5 +98,21 @@ public final class Recorder {
             let level = min(1, peak * 2.5)
             DispatchQueue.main.async { cb(level) }
         }
+    }
+
+    private func applySelectedInputDevice(to input: AVAudioInputNode) throws {
+        guard let deviceID = AudioInputDevices.deviceID(for: settings.inputDeviceID) else { return }
+        guard let audioUnit = input.audioUnit else { throw RecorderError.engineFailedToStart }
+
+        var mutableDeviceID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &mutableDeviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else { throw RecorderError.engineFailedToStart }
     }
 }

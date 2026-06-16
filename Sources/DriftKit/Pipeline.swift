@@ -3,13 +3,14 @@ import Foundation
 /// Orchestrates one dictation: record -> transcribe -> clean. UI-agnostic, so the
 /// app layer only deals with start/stop and the final string (and pasting it).
 public final class Pipeline {
-    private let recorder = Recorder()
+    private let recorder: Recorder
     private let transcriber: Transcriber
     private let settings: Settings
 
     public init(transcriber: Transcriber, settings: Settings = .shared) {
         self.transcriber = transcriber
         self.settings = settings
+        self.recorder = Recorder(settings: settings)
     }
 
     public var isRecording: Bool { recorder.isRecording }
