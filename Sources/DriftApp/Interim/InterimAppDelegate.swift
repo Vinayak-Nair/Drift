@@ -1,11 +1,16 @@
 import AppKit
 import AVFoundation
 import ApplicationServices
+import IOKit.hid
 
 // INTERIM ONLY (interim-whisper-cpp branch).
 // AppKit menu-bar shell driving the DriftKit pipeline. Transcription goes to a
-// warm local whisper.cpp server (model stays in memory) so dictation is fast.
-// `main` keeps the SwiftUI + WhisperKit version.
+// warm local whisper.cpp server (model stays in memory). `main` keeps the
+// SwiftUI + WhisperKit version.
+//
+// Permissions: the global push-to-talk key is a listen-only keyboard event tap,
+// which macOS gates behind INPUT MONITORING. Pasting the result into the focused
+// app synthesizes Cmd+V, which needs ACCESSIBILITY. Both are required.
 final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private enum State {
         case needsSetup, startingEngine, idle, recording, processing, error(String)
@@ -16,30 +21,28 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private var server: WhisperServerManager!
     private var pipeline: Pipeline?
     private var state: State = .startingEngine { didSet { updateIcon() } }
-    private var trustTimer: Timer?
-    private var lastTrusted = false
+    private var permTimer: Timer?
+    private var lastPermSignature = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
         server = WhisperServerManager(binaryPath: Self.resolveServerBinary(), modelPath: Self.resolveModel())
         rebuildMenu(); updateIcon()
 
+        // Trigger the permission prompts up front.
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        promptAccessibility()
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)        // Input Monitoring
+        _ = AXIsProcessTrustedWithOptions(                          // Accessibility
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
 
         hotkey.onPress = { [weak self] in self?.startDictation() }
         hotkey.onRelease = { [weak self] in self?.stopDictation() }
         hotkey.start()
 
-        // Detect Accessibility being granted while running, so the push-to-talk
-        // key turns on immediately without a relaunch.
-        lastTrusted = AXIsProcessTrusted()
-        trustTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let trusted = AXIsProcessTrusted()
-            if trusted && !self.hotkey.isActive { self.hotkey.start() }
-            if trusted != self.lastTrusted { self.lastTrusted = trusted; self.rebuildMenu() }
+        // Enable the hotkey the moment Input Monitoring is granted, and keep the
+        // menu's permission warnings in sync, without forcing a relaunch.
+        permTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refreshPermissions()
         }
 
         startEngine()
@@ -47,6 +50,19 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
+    }
+
+    // MARK: Permissions
+
+    private var inputMonitoringGranted: Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+    private var accessibilityGranted: Bool { AXIsProcessTrusted() }
+
+    private func refreshPermissions() {
+        if inputMonitoringGranted && !hotkey.isActive { hotkey.start() }
+        let signature = "\(inputMonitoringGranted)-\(accessibilityGranted)-\(hotkey.isActive)"
+        if signature != lastPermSignature { lastPermSignature = signature; rebuildMenu() }
     }
 
     // MARK: Engine
@@ -92,30 +108,31 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         header.isEnabled = false
         menu.addItem(header)
 
-        if !AXIsProcessTrusted() {
+        let imOK = inputMonitoringGranted
+        let axOK = accessibilityGranted
+        if !imOK || !axOK {
             menu.addItem(.separator())
-            let warn = NSMenuItem(title: "⚠ Accessibility off: push-to-talk disabled", action: nil, keyEquivalent: "")
-            warn.isEnabled = false
-            menu.addItem(warn)
-            let fix = NSMenuItem(title: "Grant Accessibility…", action: #selector(checkPermissions), keyEquivalent: "")
-            fix.target = self
-            menu.addItem(fix)
+            if !imOK {
+                addDisabled("⚠ Input Monitoring off: push-to-talk disabled", to: menu)
+                addAction("Grant Input Monitoring…", #selector(openInputMonitoring), to: menu)
+            }
+            if !axOK {
+                addDisabled("⚠ Accessibility off: can't paste text", to: menu)
+                addAction("Grant Accessibility…", #selector(openAccessibility), to: menu)
+            }
         }
 
         menu.addItem(.separator())
 
-        if case .idle = state {
-            let toggle = NSMenuItem(title: "Start Dictation", action: #selector(toggleDictation), keyEquivalent: "")
-            toggle.target = self
-            menu.addItem(toggle)
-        } else if case .recording = state {
-            let toggle = NSMenuItem(title: "Stop Dictation", action: #selector(toggleDictation), keyEquivalent: "")
-            toggle.target = self
-            menu.addItem(toggle)
-        } else if case .needsSetup = state {
-            let s = NSMenuItem(title: "Run scripts/dev-setup-clt.sh to finish setup", action: nil, keyEquivalent: "")
-            s.isEnabled = false
-            menu.addItem(s)
+        switch state {
+        case .idle:
+            addAction("Start Dictation", #selector(toggleDictation), to: menu)
+        case .recording:
+            addAction("Stop Dictation", #selector(toggleDictation), to: menu)
+        case .needsSetup:
+            addDisabled("Run scripts/dev-setup-clt.sh to finish setup", to: menu)
+        default:
+            break
         }
 
         let langMenu = NSMenu()
@@ -143,20 +160,31 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(cleanupItem)
 
         menu.addItem(.separator())
-        let perms = NSMenuItem(title: "Check Permissions…", action: #selector(checkPermissions), keyEquivalent: "")
-        perms.target = self
-        menu.addItem(perms)
+        addAction("Check Permissions…", #selector(checkPermissions), to: menu)
         let quit = NSMenuItem(title: "Quit Drift", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
         statusItem.menu = menu
     }
 
+    private func addDisabled(_ title: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+    private func addAction(_ title: String, _ action: Selector, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+    }
+
     private var statusText: String {
         switch state {
         case .needsSetup: return "Drift — setup needed"
         case .startingEngine: return "Starting speech engine…"
-        case .idle: return "Ready — hold Right Option (⌥) to talk"
+        case .idle:
+            return hotkey.isActive ? "Ready — hold Right Option (⌥) to talk"
+                                   : "Ready — grant permissions to use the hotkey"
         case .recording: return "Recording…"
         case .processing: return "Transcribing…"
         case .error(let m): return "Error: \(m)"
@@ -194,24 +222,42 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func openInputMonitoring() {
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        openSettings("Privacy_ListenEvent")
+    }
+
+    @objc private func openAccessibility() {
+        _ = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        openSettings("Privacy_Accessibility")
+    }
+
+    private func openSettings(_ anchor: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func checkPermissions() {
-        let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        let ax = AXIsProcessTrusted()
         let alert = NSAlert()
         alert.messageText = "Drift Permissions"
         alert.informativeText = """
-        Microphone: \(mic ? "granted" : "not granted")
-        Accessibility: \(ax ? "granted" : "not granted")
+        Input Monitoring: \(inputMonitoringGranted ? "granted" : "NOT granted")  (needed for the push-to-talk key)
+        Accessibility: \(accessibilityGranted ? "granted" : "NOT granted")  (needed to paste text)
+        Microphone: \(AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? "granted" : "NOT granted")
 
-        Accessibility is required for the global push-to-talk key (hold Right Option) and
-        for typing into other apps. Turn on Drift under System Settings, Privacy & Security,
-        Accessibility, then quit and reopen Drift.
+        Turn on Drift in BOTH System Settings ▸ Privacy & Security ▸ Input Monitoring
+        and ▸ Accessibility. If a permission was just granted but is still shown off,
+        quit and reopen Drift once.
         """
-        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Open Input Monitoring")
+        alert.addButton(withTitle: "Open Accessibility")
         alert.addButton(withTitle: "Close")
-        if alert.runModal() == .alertFirstButtonReturn,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: openSettings("Privacy_ListenEvent")
+        case .alertSecondButtonReturn: openSettings("Privacy_Accessibility")
+        default: break
         }
     }
 
@@ -258,10 +304,5 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             Paster.paste(text)
             Feedback.success()
         }
-    }
-
-    private func promptAccessibility() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
     }
 }

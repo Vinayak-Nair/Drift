@@ -58,6 +58,14 @@ PLIST
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || \
   echo "    (ad-hoc codesign skipped)"
 
+# Install into /Applications so the path (and TCC permission grants) are stable.
+echo "==> Installing to /Applications/Drift.app"
+pkill -x Drift 2>/dev/null || true
+sleep 1
+rm -rf /Applications/Drift.app
+cp -R "$APP" /Applications/Drift.app
+codesign --force --deep --sign - /Applications/Drift.app >/dev/null 2>&1 || true
+
 echo ""
-echo "Built: $APP"
-echo "Run:   open $APP"
+echo "Built and installed: /Applications/Drift.app"
+echo "Run:   open /Applications/Drift.app"
