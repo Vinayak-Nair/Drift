@@ -94,8 +94,10 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func resolveModel() -> String {
+        // Small multilingual model: ~4x faster than large-v3-turbo. Good for
+        // English/Hindi; weaker for Malayalam. Swap the filename to change models.
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".drift/models/ggml-large-v3-turbo-q5_0.bin").path
+            .appendingPathComponent(".drift/models/ggml-small.bin").path
     }
 
     // MARK: Menu
