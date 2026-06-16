@@ -3,23 +3,25 @@ import AVFoundation
 import ApplicationServices
 
 // INTERIM ONLY (interim-whisper-cpp branch).
-// AppKit menu-bar shell that drives the DriftKit pipeline with the whisper.cpp
-// transcriber. Used instead of the SwiftUI app so it builds with swiftc (no
-// Xcode). `main` keeps the SwiftUI + WhisperKit version.
+// AppKit menu-bar shell driving the DriftKit pipeline. Transcription goes to a
+// warm local whisper.cpp server (model stays in memory) so dictation is fast.
+// `main` keeps the SwiftUI + WhisperKit version.
 final class InterimAppDelegate: NSObject, NSApplicationDelegate {
-    private enum State { case needsSetup, idle, recording, processing, error(String) }
+    private enum State {
+        case needsSetup, startingEngine, idle, recording, processing, error(String)
+    }
 
     private var statusItem: NSStatusItem!
     private let hotkey = Hotkey()
+    private var server: WhisperServerManager!
     private var pipeline: Pipeline?
-    private var transcriber: WhisperCppTranscriber?
-    private var state: State = .idle { didSet { updateIcon() } }
+    private var state: State = .startingEngine { didSet { updateIcon() } }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        setupPipeline()
-        rebuildMenu()
-        updateIcon()
+
+        server = WhisperServerManager(binaryPath: Self.resolveServerBinary(), modelPath: Self.resolveModel())
+        rebuildMenu(); updateIcon()
 
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
         promptAccessibility()
@@ -27,24 +29,41 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         hotkey.onPress = { [weak self] in self?.startDictation() }
         hotkey.onRelease = { [weak self] in self?.stopDictation() }
         hotkey.start()
+
+        startEngine()
     }
 
-    // MARK: Setup
-
-    private func setupPipeline() {
-        let binary = Self.resolveBinary()
-        let model = Self.resolveModel()
-        let t = WhisperCppTranscriber(binaryPath: binary, modelPath: model)
-        transcriber = t
-        pipeline = Pipeline(transcriber: t, settings: .shared)
-        state = t.isReady ? .idle : .needsSetup
+    func applicationWillTerminate(_ notification: Notification) {
+        server?.stop()
     }
 
-    private static func resolveBinary() -> String {
-        let candidates = [
-            "/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli",
-            "/opt/homebrew/bin/whisper-cpp", "/usr/local/bin/whisper-cpp",
-        ]
+    // MARK: Engine
+
+    private func startEngine() {
+        guard server.isReadyToStart else { state = .needsSetup; rebuildMenu(); return }
+        state = .startingEngine
+        rebuildMenu()
+        server.start()
+        Task { [weak self] in
+            guard let self else { return }
+            let ready = await self.server.waitUntilReady()
+            await MainActor.run {
+                if ready {
+                    let t = WhisperServerTranscriber(baseURL: WhisperServerManager.baseURL)
+                    let p = Pipeline(transcriber: t, settings: .shared)
+                    p.prewarm()
+                    self.pipeline = p
+                    self.state = .idle
+                } else {
+                    self.state = .error("speech engine didn't start")
+                }
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    private static func resolveServerBinary() -> String {
+        let candidates = ["/opt/homebrew/bin/whisper-server", "/usr/local/bin/whisper-server"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[0]
     }
 
@@ -60,19 +79,31 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         let header = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
+
+        if !AXIsProcessTrusted() {
+            menu.addItem(.separator())
+            let warn = NSMenuItem(title: "⚠ Accessibility off: push-to-talk disabled", action: nil, keyEquivalent: "")
+            warn.isEnabled = false
+            menu.addItem(warn)
+            let fix = NSMenuItem(title: "Grant Accessibility…", action: #selector(checkPermissions), keyEquivalent: "")
+            fix.target = self
+            menu.addItem(fix)
+        }
+
         menu.addItem(.separator())
 
-        if case .needsSetup = state {
-            let s = NSMenuItem(title: "Run scripts/dev-setup-clt.sh to finish", action: nil, keyEquivalent: "")
-            s.isEnabled = false
-            menu.addItem(s)
-            menu.addItem(.separator())
-        } else {
-            let toggle = NSMenuItem(
-                title: isRecording ? "Stop Dictation" : "Start Dictation",
-                action: #selector(toggleDictation), keyEquivalent: "")
+        if case .idle = state {
+            let toggle = NSMenuItem(title: "Start Dictation", action: #selector(toggleDictation), keyEquivalent: "")
             toggle.target = self
             menu.addItem(toggle)
+        } else if case .recording = state {
+            let toggle = NSMenuItem(title: "Stop Dictation", action: #selector(toggleDictation), keyEquivalent: "")
+            toggle.target = self
+            menu.addItem(toggle)
+        } else if case .needsSetup = state {
+            let s = NSMenuItem(title: "Run scripts/dev-setup-clt.sh to finish setup", action: nil, keyEquivalent: "")
+            s.isEnabled = false
+            menu.addItem(s)
         }
 
         let langMenu = NSMenu()
@@ -112,6 +143,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private var statusText: String {
         switch state {
         case .needsSetup: return "Drift — setup needed"
+        case .startingEngine: return "Starting speech engine…"
         case .idle: return "Ready — hold Right Option (⌥) to talk"
         case .recording: return "Recording…"
         case .processing: return "Transcribing…"
@@ -119,16 +151,14 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private var isRecording: Bool {
-        if case .recording = state { return true } else { return false }
-    }
+    private var isRecording: Bool { if case .recording = state { return true } else { return false } }
 
     private func updateIcon() {
         guard let button = statusItem?.button else { return }
         let name: String
         switch state {
         case .recording: name = "waveform.circle.fill"
-        case .processing: name = "ellipsis.circle"
+        case .processing, .startingEngine: name = "ellipsis.circle"
         case .error, .needsSetup: name = "exclamationmark.triangle"
         case .idle: name = "waveform"
         }
@@ -161,8 +191,9 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         Microphone: \(mic ? "granted" : "not granted")
         Accessibility: \(ax ? "granted" : "not granted")
 
-        Accessibility is required for the push-to-talk key and for typing into other apps.
-        Grant it in System Settings, Privacy & Security, Accessibility, then relaunch Drift.
+        Accessibility is required for the global push-to-talk key (hold Right Option) and
+        for typing into other apps. Turn on Drift under System Settings, Privacy & Security,
+        Accessibility, then quit and reopen Drift.
         """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Close")
@@ -216,8 +247,6 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             Feedback.success()
         }
     }
-
-    // MARK: Permissions
 
     private func promptAccessibility() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary

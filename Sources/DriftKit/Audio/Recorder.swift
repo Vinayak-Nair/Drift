@@ -15,6 +15,11 @@ public final class Recorder {
 
     public init() {}
 
+    /// Pre-allocates the audio engine so the first recording starts with less lag.
+    public func prewarm() {
+        engine.prepare()
+    }
+
     /// Begins capture. Throws if the audio engine can't start (e.g. mic denied).
     public func start() throws {
         guard !isRecording else { return }

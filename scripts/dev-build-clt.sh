@@ -16,14 +16,12 @@ KIT=$(find Sources/DriftKit -name '*.swift' \
   ! -name 'WhisperKitTranscriber.swift' \
   ! -name 'ModelManager.swift')
 
-# AppKit shell (no SwiftUI).
+# AppKit shell (no SwiftUI): shared AppKit helpers + everything under Interim/.
 APPFILES="
   Sources/DriftApp/Hotkey.swift
   Sources/DriftApp/Paster.swift
   Sources/DriftApp/Feedback.swift
-  Sources/DriftApp/Interim/WhisperCppTranscriber.swift
-  Sources/DriftApp/Interim/InterimAppDelegate.swift
-  Sources/DriftApp/Interim/main.swift
+  $(find Sources/DriftApp/Interim -name '*.swift')
 "
 
 echo "==> Compiling (swiftc)"
