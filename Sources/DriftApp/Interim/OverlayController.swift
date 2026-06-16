@@ -31,6 +31,15 @@ final class OverlayController {
         bg.layer?.cornerRadius = 16
         bg.layer?.masksToBounds = true
         bg.autoresizingMask = [.width, .height]
+        bg.appearance = NSAppearance(named: .darkAqua) // force a dark frosted look
+
+        // Semi-transparent black tint over the blur so the pill reads as dark.
+        let tint = NSView(frame: NSRect(origin: .zero, size: size))
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        tint.layer?.cornerRadius = 16
+        tint.layer?.masksToBounds = true
+        tint.autoresizingMask = [.width, .height]
 
         let mic = NSImageView(image: NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil) ?? NSImage())
         mic.contentTintColor = .white
@@ -47,6 +56,7 @@ final class OverlayController {
 
         let content = NSView(frame: NSRect(origin: .zero, size: size))
         content.addSubview(bg)
+        content.addSubview(tint)
         content.addSubview(mic)
         content.addSubview(bars)
         content.addSubview(label)
