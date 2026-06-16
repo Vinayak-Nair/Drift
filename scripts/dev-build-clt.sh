@@ -55,8 +55,14 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || \
-  echo "    (ad-hoc codesign skipped)"
+# Prefer a stable self-signed identity so TCC permission grants (Input Monitoring,
+# Accessibility) survive rebuilds. Falls back to ad-hoc if the cert isn't present.
+SIGN_ID="Drift Dev Cert"
+if ! security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
+  echo "    (stable cert '$SIGN_ID' not found; falling back to ad-hoc signing)"
+  SIGN_ID="-"
+fi
+codesign --force --deep --sign "$SIGN_ID" "$APP" >/dev/null 2>&1 || echo "    (codesign skipped)"
 
 # Install into /Applications so the path (and TCC permission grants) are stable.
 echo "==> Installing to /Applications/Drift.app"
@@ -64,7 +70,7 @@ pkill -x Drift 2>/dev/null || true
 sleep 1
 rm -rf /Applications/Drift.app
 cp -R "$APP" /Applications/Drift.app
-codesign --force --deep --sign - /Applications/Drift.app >/dev/null 2>&1 || true
+codesign --force --deep --sign "$SIGN_ID" /Applications/Drift.app >/dev/null 2>&1 || true
 
 echo ""
 echo "Built and installed: /Applications/Drift.app"
