@@ -20,6 +20,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private let hotkey = Hotkey()
     private var server: WhisperServerManager!
     private var pipeline: Pipeline?
+    private let overlay = OverlayController()
     private var state: State = .startingEngine { didSet { updateIcon() } }
     private var permTimer: Timer?
     private var lastPermSignature = ""
@@ -267,6 +268,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private func startDictation() {
         driftLog("PRESS (\(statusText))")
         guard case .idle = state, let pipeline else { driftLog("press IGNORED (not ready)"); return }
+        overlay.showListening() // appears instantly; the cue to start talking
         do {
             try pipeline.startRecording()
             state = .recording
@@ -274,6 +276,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             Feedback.start()
             driftLog("recording started")
         } catch {
+            overlay.hide()
             state = .error("Microphone unavailable")
             rebuildMenu()
             driftLog("startRecording ERROR \(error)")
@@ -284,6 +287,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         guard isRecording, let pipeline else { driftLog("release IGNORED (not recording)"); return }
         driftLog("RELEASE -> processing")
         state = .processing
+        overlay.showTranscribing()
         rebuildMenu()
         Task.detached { [weak self] in
             guard let self else { return }
@@ -293,6 +297,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 driftLog("process ERROR \(error)")
                 await MainActor.run {
+                    self.overlay.hide()
                     self.state = .idle
                     self.rebuildMenu()
                     Feedback.empty()
@@ -303,6 +308,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func finish(text: String) {
         driftLog("FINISH textLen=\(text.count) \"\(text.prefix(60))\"")
+        overlay.hide()
         state = .idle
         rebuildMenu()
         if text.isEmpty {
