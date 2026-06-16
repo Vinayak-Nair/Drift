@@ -69,6 +69,13 @@ final class Hotkey {
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
+        // macOS disables a tap if a callback is slow or after some system events;
+        // re-enable it so the hotkey doesn't silently die mid-session.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+            return
+        }
+
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
         let ptt = Settings.shared.pttKeyCode
 

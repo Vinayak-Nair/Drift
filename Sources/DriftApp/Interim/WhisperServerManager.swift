@@ -29,6 +29,7 @@ final class WhisperServerManager {
             "-m", modelPath,
             "-l", "auto",            // per-request language overrides this
             "-nt",
+            "-ac", "768",            // reduced audio context: faster on short clips
             "--host", "127.0.0.1",
             "--port", "\(Self.port)",
         ]

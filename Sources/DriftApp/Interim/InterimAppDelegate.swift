@@ -94,10 +94,11 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func resolveModel() -> String {
-        // Small multilingual model: ~4x faster than large-v3-turbo. Good for
-        // English/Hindi; weaker for Malayalam. Swap the filename to change models.
+        // large-v3-turbo handles accented (e.g. Indian) English well. Paired with
+        // a reduced audio context (-ac in WhisperServerManager) so short clips
+        // don't pay the full 30s-window cost: ~3s instead of ~7s.
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".drift/models/ggml-small.bin").path
+            .appendingPathComponent(".drift/models/ggml-large-v3-turbo-q5_0.bin").path
     }
 
     // MARK: Menu
@@ -264,20 +265,24 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Dictation
 
     private func startDictation() {
-        guard case .idle = state, let pipeline else { return }
+        driftLog("PRESS (\(statusText))")
+        guard case .idle = state, let pipeline else { driftLog("press IGNORED (not ready)"); return }
         do {
             try pipeline.startRecording()
             state = .recording
             rebuildMenu()
             Feedback.start()
+            driftLog("recording started")
         } catch {
             state = .error("Microphone unavailable")
             rebuildMenu()
+            driftLog("startRecording ERROR \(error)")
         }
     }
 
     private func stopDictation() {
-        guard isRecording, let pipeline else { return }
+        guard isRecording, let pipeline else { driftLog("release IGNORED (not recording)"); return }
+        driftLog("RELEASE -> processing")
         state = .processing
         rebuildMenu()
         Task.detached { [weak self] in
@@ -286,6 +291,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
                 let text = try await pipeline.stopAndProcess()
                 await MainActor.run { self.finish(text: text) }
             } catch {
+                driftLog("process ERROR \(error)")
                 await MainActor.run {
                     self.state = .idle
                     self.rebuildMenu()
@@ -296,6 +302,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor private func finish(text: String) {
+        driftLog("FINISH textLen=\(text.count) \"\(text.prefix(60))\"")
         state = .idle
         rebuildMenu()
         if text.isEmpty {
