@@ -14,6 +14,12 @@ public final class Pipeline {
 
     public var isRecording: Bool { recorder.isRecording }
 
+    /// Live mic level (0...1) forwarded from the recorder; set before recording.
+    public var onLevel: ((Float) -> Void)? {
+        get { recorder.onLevel }
+        set { recorder.onLevel = newValue }
+    }
+
     public func startRecording() throws {
         try recorder.start()
     }

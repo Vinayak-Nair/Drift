@@ -79,7 +79,9 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             await MainActor.run {
                 if ready {
                     let t = WhisperServerTranscriber(baseURL: WhisperServerManager.baseURL)
-                    self.pipeline = Pipeline(transcriber: t, settings: .shared)
+                    let p = Pipeline(transcriber: t, settings: .shared)
+                    p.onLevel = { [weak self] level in self?.overlay.setLevel(CGFloat(level)) }
+                    self.pipeline = p
                     self.state = .idle
                 } else {
                     self.state = .error("speech engine didn't start")

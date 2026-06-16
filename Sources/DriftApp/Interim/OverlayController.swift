@@ -86,6 +86,11 @@ final class OverlayController {
         bars.active = false // calmer animation while processing
     }
 
+    /// Feed live mic level (0...1) so the bars react to the user's voice.
+    func setLevel(_ level: CGFloat) {
+        bars.setLevel(level)
+    }
+
     func hide() {
         bars.stop()
         panel.orderOut(nil)
@@ -100,36 +105,61 @@ final class OverlayController {
     }
 }
 
-/// Animated equalizer bars indicating the mic is live.
+/// Equalizer bars driven by the live mic level (peak-hold with decay), so they
+/// rise with the user's voice and fall when quiet.
 final class BarsView: NSView {
     private var phase: CGFloat = 0
     private var timer: Timer?
     private let count = 5
-    /// When false, bars animate gently (e.g. while transcribing).
+    private var heights: [CGFloat]
+    private var targetLevel: CGFloat = 0
+    /// true: react to live audio; false: gentle idle (e.g. while transcribing).
     var active = true
+
+    override init(frame frameRect: NSRect) {
+        heights = Array(repeating: 0.15, count: count)
+        super.init(frame: frameRect)
+    }
+    required init?(coder: NSCoder) {
+        heights = Array(repeating: 0.15, count: 5)
+        super.init(coder: coder)
+    }
+
+    /// Live mic level in 0...1. Instant attack; the timer decays it for falloff.
+    func setLevel(_ level: CGFloat) {
+        targetLevel = max(targetLevel, min(1, level))
+    }
 
     func start() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            self?.phase += 0.35
-            self?.needsDisplay = true
+            guard let self else { return }
+            self.phase += 0.5
+            self.targetLevel *= 0.86 // decay for a peak-hold meter feel
+            for i in 0..<self.count {
+                let variation = 0.55 + 0.45 * abs(sin(self.phase + CGFloat(i) * 0.9))
+                let base = self.active ? self.targetLevel : 0.12
+                let target = max(0.1, base * variation)
+                self.heights[i] += (target - self.heights[i]) * 0.4 // smoothing
+            }
+            self.needsDisplay = true
         }
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        targetLevel = 0
+        heights = Array(repeating: 0.15, count: count)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let barWidth: CGFloat = 4
         let gap = (bounds.width - CGFloat(count) * barWidth) / CGFloat(count - 1)
         NSColor.white.setFill()
-        let amp: CGFloat = active ? 1.0 : 0.35
         for i in 0..<count {
             let x = CGFloat(i) * (barWidth + gap)
-            let s = abs(sin(phase + CGFloat(i) * 0.7))
-            let h = max(4, (4 + s * (bounds.height - 4)) * amp)
+            let h = max(3, heights[i] * bounds.height)
             let y = (bounds.height - h) / 2
             NSBezierPath(roundedRect: NSRect(x: x, y: y, width: barWidth, height: h),
                          xRadius: 2, yRadius: 2).fill()

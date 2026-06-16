@@ -13,6 +13,9 @@ public final class Recorder {
 
     public private(set) var isRecording = false
 
+    /// Called on the main thread with the live mic level (0...1) while recording.
+    public var onLevel: ((Float) -> Void)?
+
     public init() {}
 
     /// Begins capture. Throws if the audio engine can't start (e.g. mic denied).
@@ -78,8 +81,16 @@ public final class Recorder {
 
         guard let channel = out.floatChannelData?[0] else { return }
         let frames = Int(out.frameLength)
+        let buffered = UnsafeBufferPointer(start: channel, count: frames)
         lock.lock()
-        samples.append(contentsOf: UnsafeBufferPointer(start: channel, count: frames))
+        samples.append(contentsOf: buffered)
         lock.unlock()
+
+        if let cb = onLevel, frames > 0 {
+            var peak: Float = 0
+            for v in buffered { let a = abs(v); if a > peak { peak = a } }
+            let level = min(1, peak * 2.5)
+            DispatchQueue.main.async { cb(level) }
+        }
     }
 }
