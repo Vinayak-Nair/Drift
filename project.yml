@@ -1,0 +1,53 @@
+# XcodeGen spec for the Drift macOS app.
+# Generate the project with:  xcodegen generate   (see scripts/bootstrap.sh)
+# The app links DriftKit (and transitively WhisperKit) from the local Swift package.
+name: Drift
+options:
+  bundleIdPrefix: com.drift
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  DriftKit:
+    path: .
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    # Hardened runtime is required for Developer ID notarization.
+    ENABLE_HARDENED_RUNTIME: YES
+    # Set your team to sign for distribution; empty uses ad-hoc / personal team.
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  Drift:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/DriftApp
+    dependencies:
+      - package: DriftKit
+        product: DriftKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.drift.app
+        PRODUCT_NAME: Drift
+    info:
+      path: Sources/DriftApp/Info.plist
+      properties:
+        CFBundleDisplayName: Drift
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "14.0"
+        # Menu-bar only app: no Dock icon, no main window.
+        LSUIElement: true
+        NSMicrophoneUsageDescription: "Drift records your voice to transcribe it into text."
+    entitlements:
+      path: Sources/DriftApp/Drift.entitlements
+      properties:
+        # Not sandboxed: a global push-to-talk key (CGEventTap) and pasting into
+        # other apps require access the App Sandbox does not permit.
+        com.apple.security.device.audio-input: true
