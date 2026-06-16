@@ -22,11 +22,14 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private var pipeline: Pipeline?
     private let overlay = OverlayController()
     private var maxLevel: Float = 0
+    private var recordingStart: Date?
+    private var processStart: Date?
     private var state: State = .startingEngine { didSet { updateIcon() } }
     private var permTimer: Timer?
     private var lastPermSignature = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        driftLog("=== Drift launched ===")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         server = WhisperServerManager(binaryPath: Self.resolveServerBinary(), modelPath: Self.resolveModel())
         rebuildMenu(); updateIcon()
@@ -88,8 +91,10 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
                     }
                     self.pipeline = p
                     self.state = .idle
+                    driftLog("engine ready (model=large-v3-turbo-q5_0, -ac768)")
                 } else {
                     self.state = .error("speech engine didn't start")
+                    driftLog("ERROR speech engine didn't start")
                 }
                 self.rebuildMenu()
             }
@@ -170,6 +175,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         addAction("Check Permissions…", #selector(checkPermissions), to: menu)
+        addAction("Open Log", #selector(openLog), to: menu)
         let quit = NSMenuItem(title: "Quit Drift", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
@@ -248,6 +254,10 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func openLog() {
+        NSWorkspace.shared.open(DriftLog.fileURL)
+    }
+
     @objc private func checkPermissions() {
         let alert = NSAlert()
         alert.messageText = "Drift Permissions"
@@ -273,28 +283,26 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Dictation
 
     private func startDictation() {
-        let mic = AVCaptureDevice.authorizationStatus(for: .audio).rawValue
-        driftLog("PRESS (\(statusText)) micAuth=\(mic)") // 0=undet 1=restricted 2=denied 3=authorized
-        guard case .idle = state, let pipeline else { driftLog("press IGNORED (not ready)"); return }
+        guard case .idle = state, let pipeline else { driftLog("press ignored (busy or not ready)"); return }
         maxLevel = 0
+        recordingStart = Date()
         overlay.showListening() // appears instantly; the cue to start talking
         do {
             try pipeline.startRecording()
             state = .recording
             rebuildMenu()
             Feedback.start()
-            driftLog("recording started")
         } catch {
             overlay.hide()
             state = .error("Microphone unavailable")
             rebuildMenu()
-            driftLog("startRecording ERROR \(error)")
+            driftLog("ERROR microphone unavailable: \(error.localizedDescription)")
         }
     }
 
     private func stopDictation() {
-        guard isRecording, let pipeline else { driftLog("release IGNORED (not recording)"); return }
-        driftLog("RELEASE -> processing")
+        guard isRecording, let pipeline else { return }
+        processStart = Date()
         state = .processing
         overlay.showTranscribing()
         rebuildMenu()
@@ -304,7 +312,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
                 let text = try await pipeline.stopAndProcess()
                 await MainActor.run { self.finish(text: text) }
             } catch {
-                driftLog("process ERROR \(error)")
+                driftLog("ERROR transcription failed: \(error.localizedDescription)")
                 await MainActor.run {
                     self.overlay.hide()
                     self.state = .idle
@@ -316,7 +324,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor private func finish(text: String) {
-        driftLog("FINISH textLen=\(text.count) maxLevel=\(String(format: "%.3f", maxLevel)) \"\(text.prefix(60))\"")
+        logDictation(text: text)
         overlay.hide()
         state = .idle
         rebuildMenu()
@@ -325,6 +333,21 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         } else {
             Paster.paste(text)
             Feedback.success()
+        }
+    }
+
+    private func logDictation(text: String) {
+        let now = Date()
+        let audio = recordingStart.map { (processStart ?? now).timeIntervalSince($0) } ?? 0
+        let latency = processStart.map { now.timeIntervalSince($0) } ?? 0
+        let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
+        if maxLevel < 0.02 {
+            let mic = AVCaptureDevice.authorizationStatus(for: .audio).rawValue
+            driftLog(String(format: "WARN silent capture (micAuth=%d level=%.3f audio=%.1fs) -> \"%@\"",
+                            mic, maxLevel, audio, String(preview)))
+        } else {
+            driftLog(String(format: "dictation lang=%@ audio=%.1fs level=%.2f latency=%.1fs chars=%d \"%@\"",
+                            Settings.shared.languageCode, audio, maxLevel, latency, text.count, String(preview)))
         }
     }
 }
