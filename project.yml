@@ -42,8 +42,7 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "14.0"
-        # Menu-bar only app: no Dock icon, no main window.
-        LSUIElement: true
+        # Standalone app with a Dock icon; the menu-bar extra stays as a quick control.
         NSMicrophoneUsageDescription: "Drift records your voice to transcribe it into text."
     entitlements:
       path: Sources/DriftApp/Drift.entitlements

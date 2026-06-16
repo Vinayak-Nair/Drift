@@ -1,5 +1,8 @@
 import AppKit
 import DriftKit
+// Note: on the interim-whisper-cpp branch everything compiles as one swiftc
+// module, so DriftKit types (Settings) are visible without an import. On main,
+// this file imports DriftKit.
 
 /// Listens system-wide for the push-to-talk key and reports press/release.
 /// Defaults to a modifier key (Right Option) but also supports normal keys.
@@ -11,6 +14,9 @@ final class Hotkey {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isHeld = false
+
+    /// Whether the global event tap is live (false until Accessibility is granted).
+    var isActive: Bool { eventTap != nil }
 
     /// Modifier keycodes mapped to their CGEventFlags bit.
     private static let modifierFlags: [Int: CGEventFlags] = [
@@ -64,6 +70,13 @@ final class Hotkey {
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
+        // macOS disables a tap if a callback is slow or after some system events;
+        // re-enable it so the hotkey doesn't silently die mid-session.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+            return
+        }
+
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
         let ptt = Settings.shared.pttKeyCode
 

@@ -3,10 +3,12 @@ import DriftKit
 
 /// Contents of the menu-bar dropdown.
 struct DriftMenu: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject var state: AppState
 
     var body: some View {
         Text(state.statusText)
+        Text("Mic: \(state.selectedMicrophoneName)")
 
         if !state.lastText.isEmpty {
             Text("Last: \(state.lastText.prefix(40))\(state.lastText.count > 40 ? "…" : "")")
@@ -34,8 +36,23 @@ struct DriftMenu: View {
             }
         }
 
+        Menu("Microphone") {
+            ForEach(state.availableMicrophones) { device in
+                Button {
+                    state.selectMicrophone(device.id)
+                } label: {
+                    if state.selectedMicrophoneID == device.id {
+                        Label(device.name, systemImage: "checkmark")
+                    } else {
+                        Text(device.name)
+                    }
+                }
+            }
+        }
+
         Divider()
 
+        Button("Dashboard…") { openWindow(id: "dashboard") }
         Button("Settings…") { state.showSettingsWindow() }
         Button("Setup & Permissions…") { state.showOnboardingWindow() }
 

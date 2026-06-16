@@ -47,6 +47,11 @@ public final class Settings {
         set { languageCode = newValue.code }
     }
 
+    public var inputDeviceID: String {
+        get { d.string(forKey: "inputDeviceID") ?? AudioInputDevice.systemDefaultID }
+        set { d.set(newValue, forKey: "inputDeviceID") }
+    }
+
     // MARK: Hotkey
 
     /// Push-to-talk key. Default: Right Option (keycode 61).

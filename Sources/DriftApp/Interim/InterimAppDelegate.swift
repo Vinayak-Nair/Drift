@@ -1,0 +1,397 @@
+import AppKit
+import AVFoundation
+import ApplicationServices
+import IOKit.hid
+
+// INTERIM ONLY (interim-whisper-cpp branch).
+// AppKit menu-bar shell driving the DriftKit pipeline. Transcription goes to a
+// warm local whisper.cpp server (model stays in memory). `main` keeps the
+// SwiftUI + WhisperKit version.
+//
+// Permissions: the global push-to-talk key is a listen-only keyboard event tap,
+// which macOS gates behind INPUT MONITORING. Pasting the result into the focused
+// app synthesizes Cmd+V, which needs ACCESSIBILITY. Both are required.
+final class InterimAppDelegate: NSObject, NSApplicationDelegate {
+    private enum State {
+        case needsSetup, startingEngine, idle, recording, processing, error(String)
+    }
+
+    private var statusItem: NSStatusItem!
+    private let hotkey = Hotkey()
+    private var server: WhisperServerManager!
+    private var pipeline: Pipeline?
+    private let overlay = OverlayController()
+    private var maxLevel: Float = 0
+    private var recordingStart: Date?
+    private var processStart: Date?
+    private var lastDictation = ""
+    private var state: State = .startingEngine { didSet { updateIcon() } }
+    private var permTimer: Timer?
+    private var lastPermSignature = ""
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        driftLog("=== Drift launched ===")
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        server = WhisperServerManager(binaryPath: Self.resolveServerBinary(), modelPath: Self.resolveModel())
+        rebuildMenu(); updateIcon()
+
+        // Trigger the permission prompts up front.
+        AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)        // Input Monitoring
+        _ = AXIsProcessTrustedWithOptions(                          // Accessibility
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+
+        hotkey.onPress = { [weak self] in self?.startDictation() }
+        hotkey.onRelease = { [weak self] in self?.stopDictation() }
+        hotkey.start()
+
+        // Enable the hotkey the moment Input Monitoring is granted, and keep the
+        // menu's permission warnings in sync, without forcing a relaunch.
+        permTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refreshPermissions()
+        }
+
+        startEngine()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        server?.stop()
+    }
+
+    // MARK: Permissions
+
+    private var inputMonitoringGranted: Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+    private var accessibilityGranted: Bool { AXIsProcessTrusted() }
+
+    private func refreshPermissions() {
+        if inputMonitoringGranted && !hotkey.isActive { hotkey.start() }
+        let signature = "\(inputMonitoringGranted)-\(accessibilityGranted)-\(hotkey.isActive)"
+        if signature != lastPermSignature { lastPermSignature = signature; rebuildMenu() }
+    }
+
+    // MARK: Engine
+
+    private func startEngine() {
+        guard server.isReadyToStart else { state = .needsSetup; rebuildMenu(); return }
+        state = .startingEngine
+        rebuildMenu()
+        server.start()
+        Task { [weak self] in
+            guard let self else { return }
+            let ready = await self.server.waitUntilReady()
+            await MainActor.run {
+                if ready {
+                    let t = WhisperServerTranscriber(baseURL: WhisperServerManager.baseURL)
+                    let p = Pipeline(transcriber: t, settings: .shared)
+                    p.onLevel = { [weak self] level in
+                        guard let self else { return }
+                        if level > self.maxLevel { self.maxLevel = level }
+                        self.overlay.setLevel(CGFloat(level))
+                    }
+                    self.pipeline = p
+                    self.state = .idle
+                    driftLog("engine ready (model=large-v3-turbo-q5_0, -ac768)")
+                } else {
+                    self.state = .error("speech engine didn't start")
+                    driftLog("ERROR speech engine didn't start")
+                }
+                self.rebuildMenu()
+            }
+        }
+    }
+
+    private static func resolveServerBinary() -> String {
+        let candidates = ["/opt/homebrew/bin/whisper-server", "/usr/local/bin/whisper-server"]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[0]
+    }
+
+    private static func resolveModel() -> String {
+        // large-v3-turbo handles accented (e.g. Indian) English well. Paired with
+        // a reduced audio context (-ac in WhisperServerManager) so short clips
+        // don't pay the full 30s-window cost: ~3s instead of ~7s.
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".drift/models/ggml-large-v3-turbo-q5_0.bin").path
+    }
+
+    // MARK: Menu
+
+    private func rebuildMenu() {
+        let menu = NSMenu()
+        let header = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        let imOK = inputMonitoringGranted
+        let axOK = accessibilityGranted
+        if !imOK || !axOK {
+            menu.addItem(.separator())
+            if !imOK {
+                addDisabled("⚠ Input Monitoring off: push-to-talk disabled", to: menu)
+                addAction("Grant Input Monitoring…", #selector(openInputMonitoring), to: menu)
+            }
+            if !axOK {
+                addDisabled("⚠ Accessibility off: can't paste text", to: menu)
+                addAction("Grant Accessibility…", #selector(openAccessibility), to: menu)
+            }
+        }
+
+        menu.addItem(.separator())
+
+        switch state {
+        case .idle:
+            addAction("Start Dictation", #selector(toggleDictation), to: menu)
+        case .recording:
+            addAction("Stop Dictation", #selector(toggleDictation), to: menu)
+        case .needsSetup:
+            addDisabled("Run scripts/dev-setup-clt.sh to finish setup", to: menu)
+        default:
+            break
+        }
+
+        let langMenu = NSMenu()
+        for lang in Language.all {
+            let item = NSMenuItem(title: lang.displayName, action: #selector(selectLanguage(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = lang.code
+            item.state = (Settings.shared.languageCode == lang.code) ? .on : .off
+            langMenu.addItem(item)
+        }
+        let langItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
+        menu.setSubmenu(langMenu, for: langItem)
+        menu.addItem(langItem)
+
+        let cleanupMenu = NSMenu()
+        for (id, title) in [("deterministic", "On-device cleanup"), ("none", "Raw text")] {
+            let item = NSMenuItem(title: title, action: #selector(selectCleanup(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            item.state = (Settings.shared.cleanupProviderID == id) ? .on : .off
+            cleanupMenu.addItem(item)
+        }
+        let cleanupItem = NSMenuItem(title: "Cleanup", action: nil, keyEquivalent: "")
+        menu.setSubmenu(cleanupMenu, for: cleanupItem)
+        menu.addItem(cleanupItem)
+
+        menu.addItem(.separator())
+        addAction("Correct Last Dictation…", #selector(correctLast), to: menu)
+        addAction("Check Permissions…", #selector(checkPermissions), to: menu)
+        addAction("Open Log", #selector(openLog), to: menu)
+        addAction("Open Dictionary", #selector(openDictionary), to: menu)
+        let quit = NSMenuItem(title: "Quit Drift", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+    }
+
+    private func addDisabled(_ title: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+    private func addAction(_ title: String, _ action: Selector, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+    }
+
+    private var statusText: String {
+        switch state {
+        case .needsSetup: return "Drift — setup needed"
+        case .startingEngine: return "Starting speech engine…"
+        case .idle:
+            return hotkey.isActive ? "Ready — hold Right Option (⌥) to talk"
+                                   : "Ready — grant permissions to use the hotkey"
+        case .recording: return "Recording…"
+        case .processing: return "Transcribing…"
+        case .error(let m): return "Error: \(m)"
+        }
+    }
+
+    private var isRecording: Bool { if case .recording = state { return true } else { return false } }
+
+    private func updateIcon() {
+        guard let button = statusItem?.button else { return }
+        let name: String
+        switch state {
+        case .recording: name = "waveform.circle.fill"
+        case .processing, .startingEngine: name = "ellipsis.circle"
+        case .error, .needsSetup: name = "exclamationmark.triangle"
+        case .idle: name = "waveform"
+        }
+        button.image = NSImage(systemSymbolName: name, accessibilityDescription: "Drift")
+        button.image?.isTemplate = true
+    }
+
+    // MARK: Actions
+
+    @objc private func toggleDictation() {
+        if isRecording { stopDictation() } else { startDictation() }
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        if let code = sender.representedObject as? String { Settings.shared.languageCode = code }
+        rebuildMenu()
+    }
+
+    @objc private func selectCleanup(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { Settings.shared.cleanupProviderID = id }
+        rebuildMenu()
+    }
+
+    @objc private func openInputMonitoring() {
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        openSettings("Privacy_ListenEvent")
+    }
+
+    @objc private func openAccessibility() {
+        _ = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        openSettings("Privacy_Accessibility")
+    }
+
+    private func openSettings(_ anchor: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openLog() {
+        NSWorkspace.shared.open(DriftLog.fileURL)
+    }
+
+    @objc private func openDictionary() {
+        NSWorkspace.shared.open(Corrections.shared.fileURL)
+    }
+
+    @objc private func correctLast() {
+        NSApp.activate(ignoringOtherApps: true)
+        guard !lastDictation.isEmpty else {
+            let a = NSAlert()
+            a.messageText = "No recent dictation to correct"
+            a.informativeText = "Dictate something first, then use this to teach Drift a correction."
+            a.runModal()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Correct the last dictation"
+        alert.informativeText = "Edit the text to what it should have been. Drift learns the change and applies it next time."
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 90))
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 90))
+        tv.string = lastDictation
+        tv.font = .systemFont(ofSize: 13)
+        tv.isEditable = true
+        tv.isRichText = false
+        scroll.documentView = tv
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Learn")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let corrected = tv.string
+            let added = Corrections.shared.learn(original: lastDictation, corrected: corrected)
+            driftLog(added.isEmpty
+                ? "correction: no change learned"
+                : "learned: " + added.map { "\"\($0.from)\"->\"\($0.to)\"" }.joined(separator: ", "))
+            lastDictation = corrected
+        }
+    }
+
+    @objc private func checkPermissions() {
+        let alert = NSAlert()
+        alert.messageText = "Drift Permissions"
+        alert.informativeText = """
+        Input Monitoring: \(inputMonitoringGranted ? "granted" : "NOT granted")  (needed for the push-to-talk key)
+        Accessibility: \(accessibilityGranted ? "granted" : "NOT granted")  (needed to paste text)
+        Microphone: \(AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? "granted" : "NOT granted")
+
+        Turn on Drift in BOTH System Settings ▸ Privacy & Security ▸ Input Monitoring
+        and ▸ Accessibility. If a permission was just granted but is still shown off,
+        quit and reopen Drift once.
+        """
+        alert.addButton(withTitle: "Open Input Monitoring")
+        alert.addButton(withTitle: "Open Accessibility")
+        alert.addButton(withTitle: "Close")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: openSettings("Privacy_ListenEvent")
+        case .alertSecondButtonReturn: openSettings("Privacy_Accessibility")
+        default: break
+        }
+    }
+
+    // MARK: Dictation
+
+    private func startDictation() {
+        guard case .idle = state, let pipeline else { driftLog("press ignored (busy or not ready)"); return }
+        maxLevel = 0
+        recordingStart = Date()
+        overlay.showListening() // appears instantly; the cue to start talking
+        do {
+            try pipeline.startRecording()
+            state = .recording
+            rebuildMenu()
+            Feedback.start()
+        } catch {
+            overlay.hide()
+            state = .error("Microphone unavailable")
+            rebuildMenu()
+            driftLog("ERROR microphone unavailable: \(error.localizedDescription)")
+        }
+    }
+
+    private func stopDictation() {
+        guard isRecording, let pipeline else { return }
+        processStart = Date()
+        state = .processing
+        overlay.showTranscribing()
+        rebuildMenu()
+        Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                let raw = try await pipeline.stopAndProcess()
+                let text = Corrections.shared.apply(to: raw)
+                await MainActor.run { self.finish(text: text) }
+            } catch {
+                driftLog("ERROR transcription failed: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.overlay.hide()
+                    self.state = .idle
+                    self.rebuildMenu()
+                    Feedback.empty()
+                }
+            }
+        }
+    }
+
+    @MainActor private func finish(text: String) {
+        logDictation(text: text)
+        if !text.isEmpty { lastDictation = text }
+        overlay.hide()
+        state = .idle
+        rebuildMenu()
+        if text.isEmpty {
+            Feedback.empty()
+        } else {
+            Paster.paste(text)
+            Feedback.success()
+        }
+    }
+
+    private func logDictation(text: String) {
+        let now = Date()
+        let audio = recordingStart.map { (processStart ?? now).timeIntervalSince($0) } ?? 0
+        let latency = processStart.map { now.timeIntervalSince($0) } ?? 0
+        let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(60)
+        if maxLevel < 0.02 {
+            let mic = AVCaptureDevice.authorizationStatus(for: .audio).rawValue
+            driftLog(String(format: "WARN silent capture (micAuth=%d level=%.3f audio=%.1fs) -> \"%@\"",
+                            mic, maxLevel, audio, String(preview)))
+        } else {
+            let sent = pipeline?.lastTrimmedSeconds ?? 0
+            driftLog(String(format: "dictation lang=%@ audio=%.1fs sent=%.1fs level=%.2f latency=%.1fs chars=%d \"%@\"",
+                            Settings.shared.languageCode, audio, sent, maxLevel, latency, text.count, String(preview)))
+        }
+    }
+}

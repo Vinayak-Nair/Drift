@@ -6,6 +6,12 @@ struct DriftApp: App {
     @ObservedObject private var state = AppState.shared
 
     var body: some Scene {
+        WindowGroup("Drift", id: "dashboard") {
+            DashboardView()
+                .environmentObject(state)
+        }
+        .windowResizability(.contentMinSize)
+
         MenuBarExtra {
             DriftMenu().environmentObject(state)
         } label: {
@@ -17,7 +23,7 @@ struct DriftApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory) // menu-bar only, no Dock icon
+        NSApp.setActivationPolicy(.regular)
         Task { await AppState.shared.bootstrap() }
     }
 }

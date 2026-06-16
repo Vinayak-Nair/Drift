@@ -6,6 +6,25 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("Audio") {
+                Picker("Microphone", selection: Binding(
+                    get: { state.selectedMicrophoneID },
+                    set: { state.selectMicrophone($0) }
+                )) {
+                    ForEach(state.availableMicrophones) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+
+                HStack {
+                    Text("Using \(state.selectedMicrophoneName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Refresh") { state.refreshSelectedMicrophone() }
+                }
+            }
+
             Section("Transcription") {
                 Picker("Model", selection: Binding(
                     get: { state.modelVariant },
