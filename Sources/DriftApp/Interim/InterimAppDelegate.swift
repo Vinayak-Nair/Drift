@@ -24,6 +24,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private var maxLevel: Float = 0
     private var recordingStart: Date?
     private var processStart: Date?
+    private var lastDictation = ""
     private var state: State = .startingEngine { didSet { updateIcon() } }
     private var permTimer: Timer?
     private var lastPermSignature = ""
@@ -174,8 +175,10 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(cleanupItem)
 
         menu.addItem(.separator())
+        addAction("Correct Last Dictation…", #selector(correctLast), to: menu)
         addAction("Check Permissions…", #selector(checkPermissions), to: menu)
         addAction("Open Log", #selector(openLog), to: menu)
+        addAction("Open Dictionary", #selector(openDictionary), to: menu)
         let quit = NSMenuItem(title: "Quit Drift", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
@@ -258,6 +261,44 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(DriftLog.fileURL)
     }
 
+    @objc private func openDictionary() {
+        NSWorkspace.shared.open(Corrections.shared.fileURL)
+    }
+
+    @objc private func correctLast() {
+        NSApp.activate(ignoringOtherApps: true)
+        guard !lastDictation.isEmpty else {
+            let a = NSAlert()
+            a.messageText = "No recent dictation to correct"
+            a.informativeText = "Dictate something first, then use this to teach Drift a correction."
+            a.runModal()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Correct the last dictation"
+        alert.informativeText = "Edit the text to what it should have been. Drift learns the change and applies it next time."
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 90))
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 90))
+        tv.string = lastDictation
+        tv.font = .systemFont(ofSize: 13)
+        tv.isEditable = true
+        tv.isRichText = false
+        scroll.documentView = tv
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Learn")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let corrected = tv.string
+            let added = Corrections.shared.learn(original: lastDictation, corrected: corrected)
+            driftLog(added.isEmpty
+                ? "correction: no change learned"
+                : "learned: " + added.map { "\"\($0.from)\"->\"\($0.to)\"" }.joined(separator: ", "))
+            lastDictation = corrected
+        }
+    }
+
     @objc private func checkPermissions() {
         let alert = NSAlert()
         alert.messageText = "Drift Permissions"
@@ -309,7 +350,8 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         Task.detached { [weak self] in
             guard let self else { return }
             do {
-                let text = try await pipeline.stopAndProcess()
+                let raw = try await pipeline.stopAndProcess()
+                let text = Corrections.shared.apply(to: raw)
                 await MainActor.run { self.finish(text: text) }
             } catch {
                 driftLog("ERROR transcription failed: \(error.localizedDescription)")
@@ -325,6 +367,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func finish(text: String) {
         logDictation(text: text)
+        if !text.isEmpty { lastDictation = text }
         overlay.hide()
         state = .idle
         rebuildMenu()
