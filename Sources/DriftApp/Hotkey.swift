@@ -14,6 +14,9 @@ final class Hotkey {
     private var runLoopSource: CFRunLoopSource?
     private var isHeld = false
 
+    /// Whether the global event tap is live (false until Accessibility is granted).
+    var isActive: Bool { eventTap != nil }
+
     /// Modifier keycodes mapped to their CGEventFlags bit.
     private static let modifierFlags: [Int: CGEventFlags] = [
         61: .maskAlternate, 58: .maskAlternate, // right/left option

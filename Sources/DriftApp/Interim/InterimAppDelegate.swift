@@ -16,6 +16,8 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private var server: WhisperServerManager!
     private var pipeline: Pipeline?
     private var state: State = .startingEngine { didSet { updateIcon() } }
+    private var trustTimer: Timer?
+    private var lastTrusted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -29,6 +31,16 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
         hotkey.onPress = { [weak self] in self?.startDictation() }
         hotkey.onRelease = { [weak self] in self?.stopDictation() }
         hotkey.start()
+
+        // Detect Accessibility being granted while running, so the push-to-talk
+        // key turns on immediately without a relaunch.
+        lastTrusted = AXIsProcessTrusted()
+        trustTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let trusted = AXIsProcessTrusted()
+            if trusted && !self.hotkey.isActive { self.hotkey.start() }
+            if trusted != self.lastTrusted { self.lastTrusted = trusted; self.rebuildMenu() }
+        }
 
         startEngine()
     }
