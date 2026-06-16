@@ -389,8 +389,9 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             driftLog(String(format: "WARN silent capture (micAuth=%d level=%.3f audio=%.1fs) -> \"%@\"",
                             mic, maxLevel, audio, String(preview)))
         } else {
-            driftLog(String(format: "dictation lang=%@ audio=%.1fs level=%.2f latency=%.1fs chars=%d \"%@\"",
-                            Settings.shared.languageCode, audio, maxLevel, latency, text.count, String(preview)))
+            let sent = pipeline?.lastTrimmedSeconds ?? 0
+            driftLog(String(format: "dictation lang=%@ audio=%.1fs sent=%.1fs level=%.2f latency=%.1fs chars=%d \"%@\"",
+                            Settings.shared.languageCode, audio, sent, maxLevel, latency, text.count, String(preview)))
         }
     }
 }

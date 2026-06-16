@@ -14,6 +14,10 @@ public final class Pipeline {
 
     public var isRecording: Bool { recorder.isRecording }
 
+    /// Length (seconds) of audio actually sent to the transcriber after silence
+    /// trimming, for diagnostics.
+    public private(set) var lastTrimmedSeconds: Double = 0
+
     /// Live mic level (0...1) forwarded from the recorder; set before recording.
     public var onLevel: ((Float) -> Void)? {
         get { recorder.onLevel }
@@ -29,10 +33,13 @@ public final class Pipeline {
     /// degrade gracefully: selected provider -> on-device cleanup -> raw text.
     public func stopAndProcess() async throws -> String {
         let samples = recorder.stop()
-        guard !samples.isEmpty else { return "" }
+        guard !samples.isEmpty else { lastTrimmedSeconds = 0; return "" }
+
+        let trimmedSamples = SilenceTrimmer.trim(samples)
+        lastTrimmedSeconds = Double(trimmedSamples.count) / 16_000.0
 
         let language = settings.language
-        let raw = try await transcriber.transcribe(samples: samples, language: language)
+        let raw = try await transcriber.transcribe(samples: trimmedSamples, language: language)
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
