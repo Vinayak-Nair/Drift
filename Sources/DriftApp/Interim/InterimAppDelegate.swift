@@ -21,6 +21,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     private var server: WhisperServerManager!
     private var pipeline: Pipeline?
     private let overlay = OverlayController()
+    private var maxLevel: Float = 0
     private var state: State = .startingEngine { didSet { updateIcon() } }
     private var permTimer: Timer?
     private var lastPermSignature = ""
@@ -80,7 +81,11 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
                 if ready {
                     let t = WhisperServerTranscriber(baseURL: WhisperServerManager.baseURL)
                     let p = Pipeline(transcriber: t, settings: .shared)
-                    p.onLevel = { [weak self] level in self?.overlay.setLevel(CGFloat(level)) }
+                    p.onLevel = { [weak self] level in
+                        guard let self else { return }
+                        if level > self.maxLevel { self.maxLevel = level }
+                        self.overlay.setLevel(CGFloat(level))
+                    }
                     self.pipeline = p
                     self.state = .idle
                 } else {
@@ -268,8 +273,10 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Dictation
 
     private func startDictation() {
-        driftLog("PRESS (\(statusText))")
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio).rawValue
+        driftLog("PRESS (\(statusText)) micAuth=\(mic)") // 0=undet 1=restricted 2=denied 3=authorized
         guard case .idle = state, let pipeline else { driftLog("press IGNORED (not ready)"); return }
+        maxLevel = 0
         overlay.showListening() // appears instantly; the cue to start talking
         do {
             try pipeline.startRecording()
@@ -309,7 +316,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor private func finish(text: String) {
-        driftLog("FINISH textLen=\(text.count) \"\(text.prefix(60))\"")
+        driftLog("FINISH textLen=\(text.count) maxLevel=\(String(format: "%.3f", maxLevel)) \"\(text.prefix(60))\"")
         overlay.hide()
         state = .idle
         rebuildMenu()
