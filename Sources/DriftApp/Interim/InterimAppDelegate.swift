@@ -78,9 +78,7 @@ final class InterimAppDelegate: NSObject, NSApplicationDelegate {
             await MainActor.run {
                 if ready {
                     let t = WhisperServerTranscriber(baseURL: WhisperServerManager.baseURL)
-                    let p = Pipeline(transcriber: t, settings: .shared)
-                    p.prewarm()
-                    self.pipeline = p
+                    self.pipeline = Pipeline(transcriber: t, settings: .shared)
                     self.state = .idle
                 } else {
                     self.state = .error("speech engine didn't start")

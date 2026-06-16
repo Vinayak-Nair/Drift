@@ -14,11 +14,6 @@ public final class Pipeline {
 
     public var isRecording: Bool { recorder.isRecording }
 
-    /// Pre-allocates the audio engine so the first dictation starts faster.
-    public func prewarm() {
-        recorder.prewarm()
-    }
-
     public func startRecording() throws {
         try recorder.start()
     }
