@@ -114,6 +114,17 @@ Produces a signed, notarized `build/Drift.dmg`. Notarization needs a paid Apple 
 
 The release bundles the default English model (Parakeet v3, ~470 MB) inside the app so first-run dictation works instantly with no download. It's copied from your local model cache (`~/Library/Application Support/Drift/models/FluidAudio/parakeet-tdt-0.6b-v3`) — run the app once to populate it, or set `MODEL_CACHE` to a directory containing that folder. If no model is found, the DMG ships without one and users download it on first run (the previous behavior). The model is never committed to git. Multilingual Whisper models always download on demand.
 
+### Automated releases (CI)
+
+Pushing a tag that starts with `v` builds and publishes a GitHub Release automatically — no local build needed (see [`.github/workflows/release.yml`](.github/workflows/release.yml)):
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+On a macOS GitHub runner the workflow archives the app, downloads and bundles the Parakeet v3 model, builds an ad-hoc-signed `Drift.dmg`, and attaches it to a `v0.2.0` release marked **latest** — so the landing page's download link always resolves to the newest build. It sets the app's version from the tag and needs no Apple Developer account. To ship a notarized build instead, add `DEV_ID` / notary credentials as repository secrets and wire them into the build step (the script already honors `DEV_ID` and `NOTARY_PROFILE`). You can also trigger it manually from **Actions ▸ Release ▸ Run workflow**.
+
 ## Roadmap
 
 - [ ] App icon and a polished menu-bar status UI
