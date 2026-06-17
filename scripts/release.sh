@@ -30,6 +30,21 @@ mkdir -p "$BUILD/export"
 rm -rf "$APP"
 cp -R "$ARCHIVE/Products/Applications/Drift.app" "$BUILD/export/"
 
+# Bundle the default English model (Parakeet v3) so first-run dictation needs no
+# download. Source defaults to the local model cache; run the app once to populate
+# it, or point MODEL_CACHE at a directory containing the parakeet-tdt-0.6b-v3 folder.
+MODEL_CACHE="${MODEL_CACHE:-$HOME/Library/Application Support/Drift/models/FluidAudio}"
+MODEL_DIR="$MODEL_CACHE/parakeet-tdt-0.6b-v3"
+if [ -d "$MODEL_DIR" ]; then
+  echo "==> Bundling model from $MODEL_DIR"
+  DEST="$APP/Contents/Resources/BundledModels/FluidAudio"
+  mkdir -p "$DEST"
+  cp -R "$MODEL_DIR" "$DEST/"
+else
+  echo "   (No model at $MODEL_DIR: shipping without a bundled model;"
+  echo "    users will download it on first run. Set MODEL_CACHE to bundle it.)"
+fi
+
 if [ -n "${DEV_ID:-}" ]; then
   echo "==> Signing with Developer ID + hardened runtime"
   codesign --force --options runtime --deep --sign "$DEV_ID" "$APP"

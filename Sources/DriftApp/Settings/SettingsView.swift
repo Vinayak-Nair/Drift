@@ -6,22 +6,57 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Transcription") {
-                Picker("Model", selection: Binding(
-                    get: { state.modelVariant },
-                    set: { state.selectModel($0) }
+            Section("Audio") {
+                Picker("Microphone", selection: Binding(
+                    get: { state.selectedMicrophoneID },
+                    set: { state.selectMicrophone($0) }
                 )) {
-                    ForEach(ModelCatalog.options) { option in
-                        Text(option.displayName).tag(option.id)
+                    ForEach(state.availableMicrophones) { device in
+                        Text(device.name).tag(device.id)
                     }
                 }
-                Picker("Language", selection: $state.languageCode) {
-                    ForEach(Language.all) { lang in
-                        Text(lang.displayName).tag(lang.code)
+
+                HStack {
+                    Text("Using \(state.selectedMicrophoneName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Refresh") { state.refreshSelectedMicrophone() }
+                }
+            }
+
+            Section("Transcription") {
+                Picker("Engine", selection: Binding(
+                    get: { state.transcriptionBackendID },
+                    set: { state.selectTranscriptionBackend($0) }
+                )) {
+                    ForEach(TranscriptionBackend.allCases) { backend in
+                        Text(backend.displayName).tag(backend.id)
                     }
                 }
-                Text("Indian-language accuracy is best with the Large model; smaller models trade accuracy for speed.")
-                    .font(.caption).foregroundStyle(.secondary)
+
+                if state.transcriptionBackend == .whisperKit {
+                    Picker("Model", selection: Binding(
+                        get: { state.modelVariant },
+                        set: { state.selectModel($0) }
+                    )) {
+                        ForEach(ModelCatalog.options) { option in
+                            Text(option.displayName).tag(option.id)
+                        }
+                    }
+                    Picker("Language", selection: $state.languageCode) {
+                        ForEach(Language.all) { lang in
+                            Text(lang.displayName).tag(lang.code)
+                        }
+                    }
+                    Text("Indian-language accuracy is best with the Large model; smaller models trade accuracy for speed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("Model", value: state.modelDisplayName)
+                    LabeledContent("Language", value: "English")
+                    Text("FluidAudio uses Parakeet v3 for local dictation. Switch to WhisperKit for Indian-language transcription.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             Section("Cleanup") {

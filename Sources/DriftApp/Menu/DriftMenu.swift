@@ -3,10 +3,12 @@ import DriftKit
 
 /// Contents of the menu-bar dropdown.
 struct DriftMenu: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject var state: AppState
 
     var body: some View {
         Text(state.statusText)
+        Text("Mic: \(state.selectedMicrophoneName)")
 
         if !state.lastText.isEmpty {
             Text("Last: \(state.lastText.prefix(40))\(state.lastText.count > 40 ? "…" : "")")
@@ -20,15 +22,33 @@ struct DriftMenu: View {
             }
         }
 
-        Menu("Language") {
-            ForEach(Language.all) { lang in
+        if state.supportsLanguageSelection {
+            Menu("Language") {
+                ForEach(Language.all) { lang in
+                    Button {
+                        state.languageCode = lang.code
+                    } label: {
+                        if state.languageCode == lang.code {
+                            Label(lang.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(lang.displayName)
+                        }
+                    }
+                }
+            }
+        } else {
+            Text("Language: English")
+        }
+
+        Menu("Microphone") {
+            ForEach(state.availableMicrophones) { device in
                 Button {
-                    state.languageCode = lang.code
+                    state.selectMicrophone(device.id)
                 } label: {
-                    if state.languageCode == lang.code {
-                        Label(lang.displayName, systemImage: "checkmark")
+                    if state.selectedMicrophoneID == device.id {
+                        Label(device.name, systemImage: "checkmark")
                     } else {
-                        Text(lang.displayName)
+                        Text(device.name)
                     }
                 }
             }
@@ -36,6 +56,7 @@ struct DriftMenu: View {
 
         Divider()
 
+        Button("Dashboard…") { openWindow(id: "dashboard") }
         Button("Settings…") { state.showSettingsWindow() }
         Button("Setup & Permissions…") { state.showOnboardingWindow() }
 

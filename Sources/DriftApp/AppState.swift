@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import ApplicationServices
+import IOKit.hid
 import SwiftUI
 import DriftKit
 
@@ -24,7 +25,14 @@ final class AppState: ObservableObject {
     @Published private(set) var status: Status = .needsSetup
     @Published private(set) var micGranted = false
     @Published private(set) var accessibilityGranted = false
+    @Published private(set) var inputMonitoringGranted = false
     @Published private(set) var lastText = ""
+    /// Live partial transcript shown in the overlay while streaming (Nemotron).
+    @Published private(set) var livePartialText = ""
+    @Published private(set) var transcriptHistory: [TranscriptEntry]
+    @Published private(set) var availableMicrophones: [AudioInputDevice]
+    @Published private(set) var selectedMicrophoneID: String
+    @Published private(set) var selectedMicrophoneName: String
 
     // Editable settings mirrors (observable for SwiftUI). didSet writes through.
     @Published var languageCode: String { didSet { settings.languageCode = languageCode } }
@@ -34,6 +42,7 @@ final class AppState: ObservableObject {
     @Published var openAIKey: String { didSet { settings.openAIKey = openAIKey } }
     @Published var ollamaBaseURL: String { didSet { settings.ollamaBaseURL = ollamaBaseURL } }
     @Published var ollamaModel: String { didSet { settings.ollamaModel = ollamaModel } }
+    @Published private(set) var transcriptionBackendID: String
     @Published private(set) var modelVariant: String
 
     let settings = Settings.shared
@@ -42,6 +51,11 @@ final class AppState: ObservableObject {
     private let hotkey = Hotkey()
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var overlayWindow: NSPanel?
+    private var streamingStartTask: Task<Void, Never>?
+    private var streamingStartFailed = false
+    private let transcriptHistoryKey = "transcriptHistory"
+    private let transcriptHistoryLimit = 100
 
     private init() {
         let s = Settings.shared
@@ -52,15 +66,36 @@ final class AppState: ObservableObject {
         openAIKey = s.openAIKey
         ollamaBaseURL = s.ollamaBaseURL
         ollamaModel = s.ollamaModel
+        transcriptionBackendID = s.transcriptionBackendID
         modelVariant = s.modelVariant
+        transcriptHistory = Self.loadTranscriptHistory()
+
+        let devices = AudioInputDevices.available()
+        var microphoneID = s.inputDeviceID
+        if !devices.contains(where: { $0.id == microphoneID }) {
+            microphoneID = AudioInputDevice.systemDefaultID
+            s.inputDeviceID = microphoneID
+        }
+        availableMicrophones = devices
+        selectedMicrophoneID = microphoneID
+        selectedMicrophoneName = AudioInputDevices.displayName(
+            for: microphoneID,
+            in: devices
+        )
     }
 
     // MARK: Lifecycle
 
     func bootstrap() async {
         refreshPermissions()
+        refreshSelectedMicrophone()
         let ready = settings.hasCompletedOnboarding && micGranted
-            && accessibilityGranted && modelManager.isDefaultModelDownloaded
+            && accessibilityGranted && inputMonitoringGranted && modelManager.isDefaultModelDownloaded
+        if !inputMonitoringGranted {
+            // Required for the global push-to-talk key to be observed while Drift
+            // is in the background (Accessibility alone only works foreground).
+            requestInputMonitoring()
+        }
         if ready {
             await loadModelAndStart()
         } else {
@@ -76,7 +111,7 @@ final class AppState: ObservableObject {
 
     func loadModel(variant: String? = nil) async {
         let target = variant ?? settings.modelVariant
-        status = modelManager.isDownloaded(target) ? .loadingModel : .downloadingModel(0)
+        status = modelManager.isSelectedModelDownloaded(variant: target) ? .loadingModel : .downloadingModel(0)
         do {
             let transcriber = try await modelManager.loadTranscriber(variant: target) { [weak self] frac in
                 Task { @MainActor in self?.status = .downloadingModel(frac) }
@@ -103,35 +138,93 @@ final class AppState: ObservableObject {
 
     func startDictation() {
         guard case .idle = status, let pipeline else { return }
+        refreshSelectedMicrophone()
+
+        if pipeline.supportsStreaming {
+            startStreamingDictation(pipeline)
+            return
+        }
+
         do {
+            livePartialText = ""
+            showLiveOverlay()
             try pipeline.startRecording()
             status = .recording
             Feedback.start()
         } catch {
+            hideLiveOverlay()
             status = .error("Microphone unavailable")
+        }
+    }
+
+    private func startStreamingDictation(_ pipeline: Pipeline) {
+        // Set .recording synchronously so a key release that arrives before the
+        // async setup finishes still pairs with this press (stopDictation awaits
+        // the start task below). Otherwise the release is dropped and the app
+        // gets stuck in .recording, making the hotkey appear dead.
+        livePartialText = ""
+        showLiveOverlay()
+        status = .recording
+        Feedback.start()
+        streamingStartTask = Task {
+            do {
+                try await pipeline.startStreaming { [weak self] partial in
+                    Task { @MainActor in self?.livePartialText = partial }
+                }
+            } catch {
+                self.streamingStartFailed = true
+            }
         }
     }
 
     func stopDictation() async {
         guard case .recording = status, let pipeline else { return }
+        let streaming = pipeline.supportsStreaming
         status = .transcribing
+        if streaming {
+            await streamingStartTask?.value // ensure start finished before finishing
+            streamingStartTask = nil
+        }
         do {
-            let text = try await pipeline.stopAndProcess()
+            if streaming && streamingStartFailed {
+                streamingStartFailed = false
+                hideLiveOverlay()
+                status = .idle
+                Feedback.empty()
+                return
+            }
+            let text = streaming
+                ? try await pipeline.stopStreamingAndProcess()
+                : try await pipeline.stopAndProcess()
+            hideLiveOverlay()
             status = .idle
             if text.isEmpty {
                 Feedback.empty()
             } else {
                 lastText = text
+                recordTranscript(text)
                 Paster.paste(text)
                 Feedback.success()
             }
         } catch {
+            hideLiveOverlay()
             status = .idle
             Feedback.empty()
         }
     }
 
     // MARK: Model selection
+
+    func selectTranscriptionBackend(_ id: String) {
+        guard id != settings.transcriptionBackendID else { return }
+        settings.transcriptionBackendID = id
+        transcriptionBackendID = settings.transcriptionBackendID
+        hotkey.stop()
+        Task {
+            await loadModel()
+            if case .idle = status { startHotkey() }
+        }
+    }
 
     func selectModel(_ variant: String) {
         guard variant != settings.modelVariant else { return }
@@ -144,16 +237,93 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// A selectable dictation model that bundles its engine. The dashboard exposes
+    /// only this single list so the user picks a model; the engine is derived and
+    /// switched automatically (engine choice lives in Settings).
+    struct DictationModelOption: Identifiable, Hashable {
+        let id: String
+        let displayName: String
+        let backendID: String
+        let variant: String?
+    }
+
+    var dictationModelOptions: [DictationModelOption] {
+        var options: [DictationModelOption] = [
+            DictationModelOption(
+                id: TranscriptionBackend.fluidAudioEnglish.id,
+                displayName: "Parakeet v3 — English (fastest)",
+                backendID: TranscriptionBackend.fluidAudioEnglish.id,
+                variant: nil
+            ),
+            DictationModelOption(
+                id: TranscriptionBackend.nemotronEnglish.id,
+                displayName: "Nemotron 0.6B — English (streaming, beta)",
+                backendID: TranscriptionBackend.nemotronEnglish.id,
+                variant: nil
+            )
+        ]
+        for option in ModelCatalog.options {
+            options.append(DictationModelOption(
+                id: "whisperKit:\(option.id)",
+                displayName: "Whisper \(option.displayName)",
+                backendID: TranscriptionBackend.whisperKit.id,
+                variant: option.id
+            ))
+        }
+        return options
+    }
+
+    var selectedDictationModelID: String {
+        switch transcriptionBackend {
+        case .fluidAudioEnglish: return TranscriptionBackend.fluidAudioEnglish.id
+        case .nemotronEnglish: return TranscriptionBackend.nemotronEnglish.id
+        case .whisperKit: return "whisperKit:\(modelVariant)"
+        }
+    }
+
+    /// Selects a model and switches the engine to match in one reload.
+    func selectDictationModel(_ id: String) {
+        guard let option = dictationModelOptions.first(where: { $0.id == id }) else { return }
+
+        let backendChanged = option.backendID != settings.transcriptionBackendID
+        let variantChanged = option.variant != nil && option.variant != settings.modelVariant
+        guard backendChanged || variantChanged else { return }
+
+        settings.transcriptionBackendID = option.backendID
+        transcriptionBackendID = option.backendID
+        if let variant = option.variant {
+            settings.modelVariant = variant
+            modelVariant = variant
+        }
+
+        hotkey.stop()
+        Task {
+            await loadModel()
+            if case .idle = status { startHotkey() }
+        }
+    }
+
     // MARK: Permissions
 
     func refreshPermissions() {
         micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         accessibilityGranted = AXIsProcessTrusted()
+        inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+
+    /// Prompts for Input Monitoring (required to observe the push-to-talk key
+    /// while Drift is in the background) and opens the right System Settings pane.
+    func requestInputMonitoring() {
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func requestMicrophone() async {
         _ = await AVCaptureDevice.requestAccess(for: .audio)
         refreshPermissions()
+        refreshSelectedMicrophone()
     }
 
     /// Prompts for Accessibility and opens the right System Settings pane.
@@ -213,6 +383,49 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: Live transcription overlay
+
+    /// Shows a floating, click-through panel near the bottom of the screen that
+    /// displays the live partial transcript while streaming.
+    func showLiveOverlay() {
+        if overlayWindow == nil {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 120),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.level = .floating
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = false
+            panel.ignoresMouseEvents = true
+            panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            panel.contentView = NSHostingView(rootView: LiveOverlayView().environmentObject(self))
+            overlayWindow = panel
+        }
+        positionOverlay()
+        overlayWindow?.orderFrontRegardless()
+    }
+
+    func hideLiveOverlay() {
+        overlayWindow?.orderOut(nil)
+        livePartialText = ""
+    }
+
+    private func positionOverlay() {
+        guard let overlayWindow, let screen = NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let size = overlayWindow.frame.size
+        let origin = NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.minY + 120
+        )
+        overlayWindow.setFrameOrigin(origin)
+    }
+
     // MARK: Derived UI state
 
     var menuBarSymbol: String {
@@ -239,11 +452,59 @@ final class AppState: ObservableObject {
 
     var isReady: Bool { if case .idle = status { return true } else { return false } }
 
+    var languageDisplayName: String {
+        settings.effectiveLanguage.displayName
+    }
+
+    var cleanupProviderDisplayName: String {
+        CleanupRegistry.all.first { $0.id == cleanupProviderID }?.displayName ?? cleanupProviderID
+    }
+
+    var transcriptionBackend: TranscriptionBackend {
+        TranscriptionBackend.from(id: transcriptionBackendID)
+    }
+
+    var transcriptionBackendDisplayName: String {
+        transcriptionBackend.displayName
+    }
+
+    var supportsLanguageSelection: Bool {
+        transcriptionBackend.supportsLanguageSelection
+    }
+
+    var modelDisplayName: String {
+        if let backendModel = transcriptionBackend.modelDisplayName {
+            return backendModel
+        }
+        return ModelCatalog.options.first { $0.id == modelVariant }?.displayName ?? modelVariant
+    }
+
+    var modelSetupTitle: String {
+        switch transcriptionBackend {
+        case .fluidAudioEnglish, .nemotronEnglish:
+            return "Download the English speech model"
+        case .whisperKit:
+            return "Download the speech model"
+        }
+    }
+
+    var modelSetupDetail: String {
+        switch transcriptionBackend {
+        case .fluidAudioEnglish:
+            return "A one-time FluidAudio Parakeet v3 download for fast, local dictation."
+        case .nemotronEnglish:
+            return "A one-time Nemotron 0.6B streaming model download (English). Prototype for evaluating streaming latency."
+        case .whisperKit:
+            return "A one-time download of the multilingual Whisper model. Supports English plus Hindi, Tamil, Malayalam, Kannada, Telugu, and more."
+        }
+    }
+
     var allPermissionsAndModelReady: Bool {
-        micGranted && accessibilityGranted && modelManager.isDefaultModelDownloaded
+        micGranted && accessibilityGranted && inputMonitoringGranted && modelManager.isSelectedModelDownloaded()
     }
 
     func isModelDownloaded(_ variant: String) -> Bool { modelManager.isDownloaded(variant) }
+    func isSelectedModelDownloaded() -> Bool { modelManager.isSelectedModelDownloaded() }
 
     func keyName(_ code: Int) -> String {
         switch code {
@@ -255,5 +516,68 @@ final class AppState: ObservableObject {
         case 62: return "Right Control (⌃)"
         default: return "key \(code)"
         }
+    }
+
+    // MARK: Dashboard
+
+    func refreshSelectedMicrophone() {
+        availableMicrophones = AudioInputDevices.available()
+        if selectedMicrophoneID != AudioInputDevice.systemDefaultID,
+           !availableMicrophones.contains(where: { $0.id == selectedMicrophoneID }) {
+            selectedMicrophoneID = AudioInputDevice.systemDefaultID
+            settings.inputDeviceID = selectedMicrophoneID
+        }
+        selectedMicrophoneName = AudioInputDevices.displayName(
+            for: selectedMicrophoneID,
+            in: availableMicrophones
+        )
+    }
+
+    func selectMicrophone(_ id: String) {
+        selectedMicrophoneID = id
+        settings.inputDeviceID = id
+        refreshSelectedMicrophone()
+    }
+
+    func clearTranscriptHistory() {
+        transcriptHistory.removeAll()
+        persistTranscriptHistory()
+    }
+
+    func copyTranscript(_ entry: TranscriptEntry) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(entry.text, forType: .string)
+    }
+
+    func openSoundSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func recordTranscript(_ text: String) {
+        let entry = TranscriptEntry(
+            createdAt: Date(),
+            text: text,
+            languageCode: settings.effectiveLanguage.code,
+            microphoneName: selectedMicrophoneName
+        )
+        transcriptHistory.insert(entry, at: 0)
+        if transcriptHistory.count > transcriptHistoryLimit {
+            transcriptHistory.removeLast(transcriptHistory.count - transcriptHistoryLimit)
+        }
+        persistTranscriptHistory()
+    }
+
+    private static func loadTranscriptHistory() -> [TranscriptEntry] {
+        guard let data = UserDefaults.standard.data(forKey: "transcriptHistory"),
+              let decoded = try? JSONDecoder().decode([TranscriptEntry].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private func persistTranscriptHistory() {
+        guard let data = try? JSONEncoder().encode(transcriptHistory) else { return }
+        UserDefaults.standard.set(data, forKey: transcriptHistoryKey)
     }
 }

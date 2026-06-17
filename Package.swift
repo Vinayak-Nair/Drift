@@ -12,12 +12,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "0.9.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.4"),
     ],
     targets: [
         .target(
             name: "DriftKit",
             dependencies: [
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Sources/DriftKit"
         ),
