@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioUnit
+import CoreAudio
 
 /// Captures microphone audio and returns 16 kHz mono Float samples, the format
 /// WhisperKit's `transcribe(audioArray:)` expects. No temp files involved.
@@ -10,10 +12,18 @@ public final class Recorder {
     private var samples: [Float] = []
     private let targetSampleRate: Double = 16_000
     private let lock = NSLock()
+    private let settings: Settings
 
     public private(set) var isRecording = false
 
-    public init() {}
+    /// Optional live tap: called with each freshly converted 16 kHz mono chunk as
+    /// it's captured, in addition to being accumulated for the batch result. Used
+    /// by streaming transcription. Called on the audio thread.
+    public var onSamples: (([Float]) -> Void)?
+
+    public init(settings: Settings = .shared) {
+        self.settings = settings
+    }
 
     /// Begins capture. Throws if the audio engine can't start (e.g. mic denied).
     public func start() throws {
@@ -21,6 +31,7 @@ public final class Recorder {
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
         let input = engine.inputNode
+        try applySelectedInputDevice(to: input)
         let inputFormat = input.outputFormat(forBus: 0)
 
         guard let outputFormat = AVAudioFormat(
@@ -78,8 +89,26 @@ public final class Recorder {
 
         guard let channel = out.floatChannelData?[0] else { return }
         let frames = Int(out.frameLength)
+        let chunk = Array(UnsafeBufferPointer(start: channel, count: frames))
         lock.lock()
-        samples.append(contentsOf: UnsafeBufferPointer(start: channel, count: frames))
+        samples.append(contentsOf: chunk)
         lock.unlock()
+        onSamples?(chunk)
+    }
+
+    private func applySelectedInputDevice(to input: AVAudioInputNode) throws {
+        guard let deviceID = AudioInputDevices.deviceID(for: settings.inputDeviceID) else { return }
+        guard let audioUnit = input.audioUnit else { throw RecorderError.engineFailedToStart }
+
+        var mutableDeviceID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &mutableDeviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else { throw RecorderError.engineFailedToStart }
     }
 }

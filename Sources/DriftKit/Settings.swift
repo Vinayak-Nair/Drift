@@ -11,6 +11,16 @@ public final class Settings {
 
     // MARK: Transcription
 
+    public var transcriptionBackendID: String {
+        get { d.string(forKey: "transcriptionBackendID") ?? TranscriptionBackend.defaultBackend.rawValue }
+        set { d.set(newValue, forKey: "transcriptionBackendID") }
+    }
+
+    public var transcriptionBackend: TranscriptionBackend {
+        get { TranscriptionBackend.from(id: transcriptionBackendID) }
+        set { transcriptionBackendID = newValue.rawValue }
+    }
+
     public var modelVariant: String {
         get { d.string(forKey: "modelVariant") ?? ModelCatalog.defaultVariant }
         set { d.set(newValue, forKey: "modelVariant") }
@@ -45,6 +55,18 @@ public final class Settings {
     public var language: Language {
         get { Language.from(code: languageCode) }
         set { languageCode = newValue.code }
+    }
+
+    /// The language used for transcription and cleanup. FluidAudio's first
+    /// Drift integration is English-only, even if an old language preference is
+    /// still stored from the multilingual WhisperKit path.
+    public var effectiveLanguage: Language {
+        transcriptionBackend == .fluidAudioEnglish ? .english : language
+    }
+
+    public var inputDeviceID: String {
+        get { d.string(forKey: "inputDeviceID") ?? AudioInputDevice.systemDefaultID }
+        set { d.set(newValue, forKey: "inputDeviceID") }
     }
 
     // MARK: Hotkey

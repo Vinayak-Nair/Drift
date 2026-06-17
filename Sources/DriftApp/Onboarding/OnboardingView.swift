@@ -5,6 +5,7 @@ import DriftKit
 /// the user never needs the Terminal or any separate install.
 struct OnboardingView: View {
     @EnvironmentObject var state: AppState
+    private let permissionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var downloadFraction: Double? {
         if case .downloadingModel(let p) = state.status { return p }
@@ -12,7 +13,7 @@ struct OnboardingView: View {
     }
 
     private var modelDownloaded: Bool {
-        state.isModelDownloaded(state.modelVariant)
+        state.isSelectedModelDownloaded()
     }
 
     var body: some View {
@@ -39,10 +40,19 @@ struct OnboardingView: View {
             StepRow(
                 number: 2,
                 title: "Accessibility access",
-                detail: "Needed for the push-to-talk key and to type into other apps. You may need to relaunch Drift after granting.",
+                detail: "Lets Drift type the transcribed text into other apps.",
                 done: state.accessibilityGranted,
                 actionTitle: "Open Settings",
                 action: { state.requestAccessibility() }
+            )
+
+            StepRow(
+                number: 3,
+                title: "Input Monitoring access",
+                detail: "Lets the push-to-talk key work while other apps are focused.",
+                done: state.inputMonitoringGranted,
+                actionTitle: "Open Settings",
+                action: { state.requestInputMonitoring() }
             )
 
             modelStep
@@ -59,14 +69,15 @@ struct OnboardingView: View {
         }
         .padding(28)
         .frame(width: 520, height: 600)
+        .onReceive(permissionTimer) { _ in state.refreshPermissions() }
     }
 
     private var modelStep: some View {
         HStack(alignment: .top, spacing: 14) {
-            stepBadge(3, done: modelDownloaded)
+            stepBadge(4, done: modelDownloaded)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Download the speech model").font(.headline)
-                Text("A one-time download of the multilingual Whisper model (large-v3 turbo). Supports English plus Hindi, Tamil, Malayalam, Kannada, Telugu, and more.")
+                Text(state.modelSetupTitle).font(.headline)
+                Text(state.modelSetupDetail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

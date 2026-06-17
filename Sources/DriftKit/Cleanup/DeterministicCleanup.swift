@@ -34,6 +34,7 @@ public struct DeterministicCleanup: CleanupProvider {
         t = removeFillers(from: t)
         t = collapseWhitespace(t)
         t = removeSpaceBeforePunctuation(t)
+        t = addSpaceAfterSentencePunctuation(t)
         if language == .english || language.isAuto {
             t = capitalizeStandaloneI(t)
         }
@@ -67,6 +68,15 @@ public struct DeterministicCleanup: CleanupProvider {
 
     private func removeSpaceBeforePunctuation(_ s: String) -> String {
         s.replacingOccurrences(of: "\\s+([,.!?;:])", with: "$1", options: .regularExpression)
+    }
+
+    /// Ensures a space follows sentence-ending punctuation when the transcriber
+    /// glues the next sentence on (e.g. "done.Next" -> "done. Next"). Restricted
+    /// to a letter following `.!?` so decimals ("3.14") and ellipses are untouched.
+    private func addSpaceAfterSentencePunctuation(_ s: String) -> String {
+        s.replacingOccurrences(
+            of: "([.!?])(\\p{L})", with: "$1 $2", options: .regularExpression
+        )
     }
 
     private func capitalizeStandaloneI(_ s: String) -> String {

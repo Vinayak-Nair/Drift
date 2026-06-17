@@ -10,6 +10,8 @@ final class Hotkey {
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var tapThread: Thread?
+    private var tapRunLoop: CFRunLoop?
     private var isHeld = false
 
     /// Modifier keycodes mapped to their CGEventFlags bit.
@@ -29,6 +31,15 @@ final class Hotkey {
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon else { return Unmanaged.passUnretained(event) }
             let hotkey = Unmanaged<Hotkey>.fromOpaque(refcon).takeUnretainedValue()
+            // macOS disables a tap if its run loop is starved past a timeout (or on
+            // certain user input). Re-enable it so the hotkey keeps working instead
+            // of dying after the first stall.
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                if let tap = hotkey.eventTap {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
+                return Unmanaged.passUnretained(event)
+            }
             hotkey.handle(type: type, event: event)
             return Unmanaged.passUnretained(event)
         }
@@ -45,22 +56,40 @@ final class Hotkey {
             NSLog("Drift: could not create event tap (needs Accessibility permission)")
             return
         }
-
         eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+
+        // Run the tap on a dedicated thread with its own run loop. If it shared the
+        // main run loop, heavy main-thread work (model warm-up, transcription) would
+        // starve the tap and macOS would disable it — the "works once, then dead"
+        // symptom. A private thread keeps key delivery responsive regardless.
+        let thread = Thread { [weak self] in
+            guard let self, let tap = self.eventTap else { return }
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            self.runLoopSource = source
+            self.tapRunLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            CFRunLoopRun()
+        }
+        thread.name = "com.drift.hotkey"
+        tapThread = thread
+        thread.start()
     }
 
     func stop() {
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        }
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
+        if let tapRunLoop {
+            if let runLoopSource {
+                CFRunLoopRemoveSource(tapRunLoop, runLoopSource, .commonModes)
+            }
+            CFRunLoopStop(tapRunLoop)
+        }
         runLoopSource = nil
         eventTap = nil
+        tapRunLoop = nil
+        tapThread = nil
     }
 
     private func handle(type: CGEventType, event: CGEvent) {

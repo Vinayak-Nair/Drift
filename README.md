@@ -2,11 +2,12 @@
 
 **Local-first voice dictation for macOS. A free, open-source alternative to Wispr Flow.**
 
-Hold a key, speak, and Drift types cleaned-up text into whatever app you're using. Transcription runs entirely on your Mac with [WhisperKit](https://github.com/argmaxinc/WhisperKit), so your voice never leaves the device.
+Hold a key, speak, and Drift types cleaned-up text into whatever app you're using. English transcription runs entirely on your Mac with [FluidAudio](https://github.com/FluidInference/FluidAudio); [WhisperKit](https://github.com/argmaxinc/WhisperKit) remains available as the multilingual backend.
 
 - 🎙️ **Push-to-talk anywhere**, system-wide
 - 🔒 **Private by default**: on-device transcription and on-device cleanup, no account, no API key
-- 🌐 **Multilingual**, with a focus on Indian languages (Hindi, Tamil, Malayalam, Kannada, Telugu) alongside English and more
+- 🇬🇧 **English-first right now**, using FluidAudio's local Parakeet model for fast dictation
+- 🌐 **Multilingual optional**, via the WhisperKit backend for Hindi, Tamil, Malayalam, Kannada, Telugu, and more
 - 🧹 **Smart cleanup**: removes filler words and fixes punctuation instantly on-device; optional cloud or local LLM cleanup for higher quality
 - 🪶 **Native and lightweight**: a Swift menu-bar app, no Electron
 - 🆓 **MIT licensed**
@@ -32,7 +33,7 @@ No Homebrew, no Terminal, no separate downloads. Everything is handled inside th
 
 ## Languages
 
-Drift ships a multilingual model and supports English plus Hindi, Tamil, Malayalam, Kannada, Telugu, and others. Accuracy varies by language (Hindi and Tamil are strong; Malayalam and Kannada are improving). For the best Indian-language accuracy keep the default **Large v3 Turbo** model; switch to a smaller model in Settings if you want more speed.
+Drift currently defaults to **FluidAudio English** using Parakeet TDT v3. In Settings you can switch the transcription engine to **WhisperKit Multilingual** for English plus Hindi, Tamil, Malayalam, Kannada, Telugu, and others. Accuracy varies by language; for the best Indian-language accuracy use WhisperKit's **Large v3 Turbo** model.
 
 ## Cleanup options
 
@@ -73,6 +74,22 @@ Run the core unit tests with:
 swift test
 ```
 
+### Push-to-talk permission across rebuilds
+
+The global push-to-talk hotkey needs macOS **Accessibility** permission, which is
+tied to the app's code signature. Default ad-hoc signing changes the signature on
+every rebuild, so the grant is invalidated each time and the hotkey "stops
+working." To make it stick, sign local builds with a stable self-signed identity:
+
+```bash
+./scripts/setup-dev-cert.sh   # one-time: creates a "Drift Dev" code-signing cert
+./scripts/dev-run.sh          # build + sign + relaunch (use this instead of Cmd+R)
+```
+
+Grant Accessibility to Drift once after the first signed build; it then persists
+across all future `dev-run.sh` rebuilds (the signature, hence the permission, no
+longer changes). No Apple Developer account required.
+
 ### Project layout
 
 `DriftKit` is a pure, testable Swift package (no UI). The macOS app in `Sources/DriftApp` is generated into an Xcode project by XcodeGen from `project.yml`.
@@ -80,7 +97,7 @@ swift test
 | Area | Path | Responsibility |
 |------|------|----------------|
 | Core | `Sources/DriftKit/Pipeline.swift` | record ▸ transcribe ▸ clean orchestration |
-| STT | `Sources/DriftKit/Transcription/` | `Transcriber` protocol, WhisperKit impl, model download |
+| STT | `Sources/DriftKit/Transcription/` | `Transcriber` protocol, FluidAudio + WhisperKit impls, model download |
 | Cleanup | `Sources/DriftKit/Cleanup/` | `CleanupProvider` protocol + deterministic / OpenAI-compatible / Ollama |
 | Audio | `Sources/DriftKit/Audio/Recorder.swift` | mic capture to 16 kHz samples |
 | App | `Sources/DriftApp/` | menu bar, onboarding, settings, hotkey, paste |
@@ -95,6 +112,8 @@ NOTARY_PROFILE="drift-notary" \
 
 Produces a signed, notarized `build/Drift.dmg`. Notarization needs a paid Apple Developer account; without one the script still builds an ad-hoc-signed DMG for local use.
 
+The release bundles the default English model (Parakeet v3, ~470 MB) inside the app so first-run dictation works instantly with no download. It's copied from your local model cache (`~/Library/Application Support/Drift/models/FluidAudio/parakeet-tdt-0.6b-v3`) — run the app once to populate it, or set `MODEL_CACHE` to a directory containing that folder. If no model is found, the DMG ships without one and users download it on first run (the previous behavior). The model is never committed to git. Multilingual Whisper models always download on demand.
+
 ## Roadmap
 
 - [ ] App icon and a polished menu-bar status UI
@@ -106,7 +125,7 @@ Produces a signed, notarized `build/Drift.dmg`. Notarization needs a paid Apple 
 
 ## Credits
 
-Built on [WhisperKit](https://github.com/argmaxinc/WhisperKit) by Argmax. Inspired by Wispr Flow.
+Built on [FluidAudio](https://github.com/FluidInference/FluidAudio) by FluidInference and [WhisperKit](https://github.com/argmaxinc/WhisperKit) by Argmax. Inspired by Wispr Flow.
 
 ## License
 
