@@ -20,6 +20,11 @@ on:
         description: 'Release tag to create (e.g. v0.2.0)'
         required: true
         type: string
+      prerelease:
+        description: 'Publish as a prerelease (not marked latest) — use for dry-runs'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -43,6 +48,7 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
+          VERSION="${VERSION%%-*}"   # drop any prerelease suffix (v0.2.0-rc.1 -> 0.2.0) for a valid app version
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building $TAG (marketing version $VERSION)"
@@ -99,10 +105,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.meta.outputs.tag }}"
+          PRERELEASE="${{ github.event.inputs.prerelease || 'false' }}"
           test -f build/Drift.dmg || { echo "::error::build/Drift.dmg not found"; exit 1; }
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists — replacing the DMG asset."
             gh release upload "$TAG" build/Drift.dmg --clobber
+          elif [ "$PRERELEASE" = "true" ]; then
+            echo "Publishing $TAG as a prerelease (not marked latest)."
+            gh release create "$TAG" build/Drift.dmg \
+              --title "Drift $TAG" \
+              --notes-file .github/release-body.md \
+              --generate-notes \
+              --prerelease \
+              --latest=false
           else
             gh release create "$TAG" build/Drift.dmg \
               --title "Drift $TAG" \
