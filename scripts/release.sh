@@ -55,7 +55,20 @@ fi
 
 echo "==> Building DMG"
 rm -f "$DMG"
-hdiutil create -volname Drift -srcfolder "$APP" -ov -format UDZO "$DMG"
+# hdiutil can transiently fail with "Resource busy" when Spotlight/mdworker is
+# touching the source app (common on CI runners). Retry a few times.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname Drift -srcfolder "$APP" -ov -format UDZO "$DMG"; then
+    break
+  fi
+  if [ "$attempt" = 5 ]; then
+    echo "hdiutil create failed after $attempt attempts." >&2
+    exit 1
+  fi
+  echo "   (hdiutil busy; retrying in 5s — attempt $attempt of 5)"
+  rm -f "$DMG"
+  sleep 5
+done
 
 if [ -n "${NOTARY_PROFILE:-}" ] && [ -n "${DEV_ID:-}" ]; then
   echo "==> Notarizing (this can take a few minutes)"
