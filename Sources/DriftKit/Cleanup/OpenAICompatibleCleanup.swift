@@ -11,11 +11,13 @@ public struct OpenAICompatibleCleanup: CleanupProvider {
     let baseURL: String
     let model: String
     let apiKey: String
+    let tone: String?
 
-    public init(baseURL: String, model: String, apiKey: String) {
+    public init(baseURL: String, model: String, apiKey: String, tone: String? = nil) {
         self.baseURL = baseURL
         self.model = model
         self.apiKey = apiKey
+        self.tone = tone
     }
 
     public func clean(_ text: String, language: Language) async throws -> String {
@@ -35,7 +37,7 @@ public struct OpenAICompatibleCleanup: CleanupProvider {
             "model": model,
             "temperature": 0.2,
             "messages": [
-                ["role": "system", "content": CleanupPrompt.system(for: language)],
+                ["role": "system", "content": CleanupPrompt.system(for: language, tone: tone)],
                 ["role": "user", "content": text],
             ],
         ]

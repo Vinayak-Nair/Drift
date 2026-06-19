@@ -87,6 +87,24 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Commands") {
+                Toggle("Voice command mode", isOn: $state.commandModeEnabled)
+                Text("Say “new line”, “comma”, “scratch that”… and Drift formats instead of typing the words. English only.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Per-app formatting") {
+                Toggle("Match style to the app", isOn: $state.perAppProfilesEnabled)
+                Picker("Default style", selection: $state.defaultProfileID) {
+                    ForEach(FormattingProfile.all) { profile in
+                        Text(profile.name).tag(profile.id)
+                    }
+                }
+                .disabled(!state.perAppProfilesEnabled)
+                Text("The default applies to apps without their own rule. Add apps and tune each one on the Dashboard.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("Push-to-talk") {
                 LabeledContent("Key", value: state.keyName(state.settings.pttKeyCode))
                 Text("Hold the key, speak, and release to insert text.")

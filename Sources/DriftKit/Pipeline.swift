@@ -44,7 +44,8 @@ public final class Pipeline {
     }
 
     /// Stops a streaming session, finishes decoding, and returns the cleaned text.
-    public func stopStreamingAndProcess() async throws -> String {
+    /// `targetBundleID` is the app being dictated into, used to pick a formatting profile.
+    public func stopStreamingAndProcess(targetBundleID: String? = nil) async throws -> String {
         recorder.onSamples = nil
         _ = recorder.stop()
         guard let streaming = transcriber as? StreamingTranscriber else { return "" }
@@ -53,13 +54,13 @@ public final class Pipeline {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
-        return await clean(trimmed)
+        return await clean(trimmed, targetBundleID: targetBundleID)
     }
 
     /// Stops recording, transcribes, and cleans using the currently selected
     /// provider. Returns "" if nothing usable was captured. Cleanup failures
     /// degrade gracefully: selected provider -> on-device cleanup -> raw text.
-    public func stopAndProcess() async throws -> String {
+    public func stopAndProcess(targetBundleID: String? = nil) async throws -> String {
         let samples = recorder.stop()
         guard !samples.isEmpty else { return "" }
 
@@ -68,19 +69,43 @@ public final class Pipeline {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
-        return await clean(trimmed)
+        return await clean(trimmed, targetBundleID: targetBundleID)
     }
 
-    /// Cleans transcript text with the selected provider. Failures degrade
-    /// gracefully: selected provider -> on-device cleanup -> raw text.
-    private func clean(_ text: String) async -> String {
+    /// Cleans transcript text using the formatting profile for the destination app
+    /// and the selected provider. Failures degrade gracefully: selected provider
+    /// -> on-device cleanup -> raw text.
+    private func clean(_ text: String, targetBundleID: String?) async -> String {
         let language = settings.effectiveLanguage
-        let cleaner = CleanupFactory.make(settings: settings)
+        let profile = FormattingProfiles.resolve(bundleID: targetBundleID, settings: settings)
+        let prepared = applyCommandMode(to: text, language: language)
+
+        // Code destinations are inserted verbatim — never reshaped, never sent to
+        // a cloud provider.
+        if profile.style == .code { return prepared }
+
+        let cleaner = CleanupFactory.make(settings: settings, profile: profile)
+        var result: String
         do {
-            return try await cleaner.clean(text, language: language)
+            result = try await cleaner.clean(prepared, language: language)
         } catch {
-            return (try? await DeterministicCleanup().clean(text, language: language)) ?? text
+            result = (try? await DeterministicCleanup().clean(prepared, language: language)) ?? prepared
         }
+
+        if profile.style == .casual {
+            result = FormattingProfiles.applyCasualTrim(result)
+        }
+        return result
+    }
+
+    /// Rewrites spoken commands ("new line", "comma"…) before cleanup when the
+    /// feature is enabled. Skipped for Indic scripts since the commands are English.
+    private func applyCommandMode(to text: String, language: Language) -> String {
+        guard settings.commandModeEnabled else { return text }
+        let isIndic = language.script == .indic
+            || (language.isAuto && DeterministicCleanup.containsIndic(text))
+        guard !isIndic else { return text }
+        return CommandProcessor().process(text)
     }
 
     /// Discard an in-progress recording without processing it.

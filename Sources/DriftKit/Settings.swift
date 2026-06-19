@@ -109,6 +109,42 @@ public final class Settings {
         set { d.set(newValue, forKey: "ollamaModel") }
     }
 
+    // MARK: Per-app formatting
+
+    /// When on, Drift picks a formatting profile based on the app being dictated
+    /// into (e.g. Casual in Slack, Code in Xcode).
+    public var perAppProfilesEnabled: Bool {
+        get { d.object(forKey: "perAppProfilesEnabled") as? Bool ?? true }
+        set { d.set(newValue, forKey: "perAppProfilesEnabled") }
+    }
+
+    /// The profile applied to any app without its own rule. User-selectable.
+    public var defaultProfileID: String {
+        get { d.string(forKey: "defaultProfileID") ?? "standard" }
+        set { d.set(newValue, forKey: "defaultProfileID") }
+    }
+
+    /// User-chosen profile id per app bundle id, overriding the built-in defaults.
+    public var profileOverrides: [String: String] {
+        get { d.dictionary(forKey: "profileOverrides") as? [String: String] ?? [:] }
+        set { d.set(newValue, forKey: "profileOverrides") }
+    }
+
+    public func setProfileOverride(_ profileID: String?, forBundleID id: String) {
+        var overrides = profileOverrides
+        overrides[id] = profileID
+        profileOverrides = overrides
+    }
+
+    // MARK: Commands
+
+    /// When on, spoken commands ("new line", "comma", "scratch that"…) are
+    /// interpreted as formatting instead of literal words. English only.
+    public var commandModeEnabled: Bool {
+        get { d.bool(forKey: "commandModeEnabled") }
+        set { d.set(newValue, forKey: "commandModeEnabled") }
+    }
+
     // MARK: App state
 
     public var hasCompletedOnboarding: Bool {

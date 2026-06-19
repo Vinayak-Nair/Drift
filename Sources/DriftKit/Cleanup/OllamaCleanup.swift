@@ -10,10 +10,12 @@ public struct OllamaCleanup: CleanupProvider {
 
     let baseURL: String
     let model: String
+    let tone: String?
 
-    public init(baseURL: String, model: String) {
+    public init(baseURL: String, model: String, tone: String? = nil) {
         self.baseURL = baseURL
         self.model = model
+        self.tone = tone
     }
 
     public func clean(_ text: String, language: Language) async throws -> String {
@@ -28,7 +30,7 @@ public struct OllamaCleanup: CleanupProvider {
 
         let body: [String: Any] = [
             "model": model,
-            "system": CleanupPrompt.system(for: language),
+            "system": CleanupPrompt.system(for: language, tone: tone),
             "prompt": text,
             "stream": false,
             "options": ["temperature": 0.2],

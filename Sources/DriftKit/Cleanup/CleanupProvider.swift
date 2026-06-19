@@ -40,9 +40,10 @@ public enum CleanupRegistry {
     ]
 }
 
-/// Builds the active provider from current settings.
+/// Builds the active provider from current settings. The optional `profile`
+/// carries the per-app tone instruction, which only the LLM providers use.
 public enum CleanupFactory {
-    public static func make(settings: Settings) -> CleanupProvider {
+    public static func make(settings: Settings, profile: FormattingProfile = .standard) -> CleanupProvider {
         switch settings.cleanupProviderID {
         case "none":
             return PassthroughCleanup()
@@ -50,12 +51,14 @@ public enum CleanupFactory {
             return OpenAICompatibleCleanup(
                 baseURL: settings.openAIBaseURL,
                 model: settings.openAIModel,
-                apiKey: settings.openAIKey
+                apiKey: settings.openAIKey,
+                tone: profile.tone
             )
         case "ollama":
             return OllamaCleanup(
                 baseURL: settings.ollamaBaseURL,
-                model: settings.ollamaModel
+                model: settings.ollamaModel,
+                tone: profile.tone
             )
         default:
             return DeterministicCleanup()
@@ -66,20 +69,24 @@ public enum CleanupFactory {
 /// Shared instruction used by every LLM-backed provider. Crucially tells the
 /// model to keep the original language and script (so Malayalam stays Malayalam).
 enum CleanupPrompt {
-    static func system(for language: Language) -> String {
+    static func system(for language: Language, tone: String? = nil) -> String {
         let langClause: String
         if language.isAuto {
             langClause = "the same language and script as the input"
         } else {
             langClause = "\(language.displayName) (keep the same script as the input)"
         }
-        return """
+        var prompt = """
         You are a dictation cleanup engine. The user dictated text by voice. \
         Rewrite it as clean written text in \(langClause): remove filler words, \
         fix grammar and punctuation, and apply natural capitalization and spacing. \
         Do NOT translate. Do NOT add information, answer questions, or add commentary. \
         Preserve the original meaning. Output ONLY the cleaned text.
         """
+        if let tone, !tone.isEmpty {
+            prompt += " \(tone)"
+        }
+        return prompt
     }
 }
 

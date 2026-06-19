@@ -3,6 +3,7 @@ import AVFoundation
 import ApplicationServices
 import IOKit.hid
 import SwiftUI
+import UniformTypeIdentifiers
 import DriftKit
 
 /// Central app orchestrator: owns the model, pipeline, and hotkey; tracks status
@@ -30,6 +31,7 @@ final class AppState: ObservableObject {
     /// Live partial transcript shown in the overlay while streaming (Nemotron).
     @Published private(set) var livePartialText = ""
     @Published private(set) var transcriptHistory: [TranscriptEntry]
+    @Published private(set) var recentTargetApps: [TargetApp]
     @Published private(set) var availableMicrophones: [AudioInputDevice]
     @Published private(set) var selectedMicrophoneID: String
     @Published private(set) var selectedMicrophoneName: String
@@ -37,6 +39,9 @@ final class AppState: ObservableObject {
     // Editable settings mirrors (observable for SwiftUI). didSet writes through.
     @Published var languageCode: String { didSet { settings.languageCode = languageCode } }
     @Published var cleanupProviderID: String { didSet { settings.cleanupProviderID = cleanupProviderID } }
+    @Published var commandModeEnabled: Bool { didSet { settings.commandModeEnabled = commandModeEnabled } }
+    @Published var perAppProfilesEnabled: Bool { didSet { settings.perAppProfilesEnabled = perAppProfilesEnabled } }
+    @Published var defaultProfileID: String { didSet { settings.defaultProfileID = defaultProfileID } }
     @Published var openAIBaseURL: String { didSet { settings.openAIBaseURL = openAIBaseURL } }
     @Published var openAIModel: String { didSet { settings.openAIModel = openAIModel } }
     @Published var openAIKey: String { didSet { settings.openAIKey = openAIKey } }
@@ -56,11 +61,19 @@ final class AppState: ObservableObject {
     private var streamingStartFailed = false
     private let transcriptHistoryKey = "transcriptHistory"
     private let transcriptHistoryLimit = 100
+    private let recentAppsKey = "recentTargetApps"
+    private let recentAppsLimit = 12
+    /// Bundle id of the app frontmost when the current dictation started; drives
+    /// the per-app formatting profile applied at paste time.
+    private var currentTargetBundleID: String?
 
     private init() {
         let s = Settings.shared
         languageCode = s.languageCode
         cleanupProviderID = s.cleanupProviderID
+        commandModeEnabled = s.commandModeEnabled
+        perAppProfilesEnabled = s.perAppProfilesEnabled
+        defaultProfileID = s.defaultProfileID
         openAIBaseURL = s.openAIBaseURL
         openAIModel = s.openAIModel
         openAIKey = s.openAIKey
@@ -69,6 +82,7 @@ final class AppState: ObservableObject {
         transcriptionBackendID = s.transcriptionBackendID
         modelVariant = s.modelVariant
         transcriptHistory = Self.loadTranscriptHistory()
+        recentTargetApps = Self.loadRecentTargetApps()
 
         let devices = AudioInputDevices.available()
         var microphoneID = s.inputDeviceID
@@ -138,6 +152,7 @@ final class AppState: ObservableObject {
 
     func startDictation() {
         guard case .idle = status, let pipeline else { return }
+        captureTargetApp()
         refreshSelectedMicrophone()
 
         if pipeline.supportsStreaming {
@@ -194,8 +209,8 @@ final class AppState: ObservableObject {
                 return
             }
             let text = streaming
-                ? try await pipeline.stopStreamingAndProcess()
-                : try await pipeline.stopAndProcess()
+                ? try await pipeline.stopStreamingAndProcess(targetBundleID: currentTargetBundleID)
+                : try await pipeline.stopAndProcess(targetBundleID: currentTargetBundleID)
             hideLiveOverlay()
             status = .idle
             if text.isEmpty {
@@ -552,6 +567,83 @@ final class AppState: ObservableObject {
     func openSoundSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    // MARK: Per-app formatting
+
+    /// Remembers which app is frontmost as a dictation begins — that's the app the
+    /// text will paste into, so it drives the formatting profile.
+    private func captureTargetApp() {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let bundleID = app.bundleIdentifier,
+              bundleID != Bundle.main.bundleIdentifier else {
+            currentTargetBundleID = nil
+            return
+        }
+        currentTargetBundleID = bundleID
+        recordTargetApp(bundleID: bundleID, name: app.localizedName ?? bundleID)
+    }
+
+    private func recordTargetApp(bundleID: String, name: String) {
+        var apps = recentTargetApps.filter { $0.bundleID != bundleID }
+        apps.insert(TargetApp(bundleID: bundleID, name: name), at: 0)
+        if apps.count > recentAppsLimit { apps.removeLast(apps.count - recentAppsLimit) }
+        recentTargetApps = apps
+        persistRecentApps()
+    }
+
+    private func persistRecentApps() {
+        if let data = try? JSONEncoder().encode(recentTargetApps) {
+            UserDefaults.standard.set(data, forKey: recentAppsKey)
+        }
+    }
+
+    /// Lets the user pick any installed app to give it a formatting profile,
+    /// without waiting to dictate into it first.
+    func addApp() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an app for a formatting profile"
+        panel.prompt = "Add"
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        guard panel.runModal() == .OK, let url = panel.url,
+              let bundleID = Bundle(url: url)?.bundleIdentifier else { return }
+        let name = FileManager.default.displayName(atPath: url.path)
+            .replacingOccurrences(of: ".app", with: "")
+        recordTargetApp(bundleID: bundleID, name: name)
+    }
+
+    /// Removes an app from the list and clears any per-app override, reverting it
+    /// to the default profile.
+    func removeApp(_ app: TargetApp) {
+        recentTargetApps.removeAll { $0.bundleID == app.bundleID }
+        settings.setProfileOverride(nil, forBundleID: app.bundleID)
+        persistRecentApps()
+    }
+
+    /// The profile id currently in effect for an app (override → built-in → standard).
+    func profileID(forBundleID id: String) -> String {
+        FormattingProfiles.effectiveProfileID(bundleID: id, settings: settings)
+    }
+
+    func setProfile(_ profileID: String, forBundleID id: String) {
+        settings.setProfileOverride(profileID, forBundleID: id)
+        objectWillChange.send() // overrides aren't @Published; nudge the UI
+    }
+
+    /// The destination app's icon, if it can be located on disk.
+    func appIcon(forBundleID id: String) -> NSImage? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return nil }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+
+    private static func loadRecentTargetApps() -> [TargetApp] {
+        guard let data = UserDefaults.standard.data(forKey: "recentTargetApps"),
+              let decoded = try? JSONDecoder().decode([TargetApp].self, from: data) else {
+            return []
+        }
+        return decoded
     }
 
     private func recordTranscript(_ text: String) {

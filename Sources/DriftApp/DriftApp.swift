@@ -11,6 +11,7 @@ struct DriftApp: App {
                 .environmentObject(state)
         }
         .windowResizability(.contentMinSize)
+        .windowStyle(.hiddenTitleBar)
 
         MenuBarExtra {
             DriftMenu().environmentObject(state)
