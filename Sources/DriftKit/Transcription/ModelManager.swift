@@ -1,3 +1,4 @@
+import CoreML
 import Foundation
 import FluidAudio
 import WhisperKit
@@ -183,7 +184,15 @@ public final class ModelManager {
             settings.setModelFolderPath(folder.path, for: variant)
         }
 
-        let config = WhisperKitConfig(modelFolder: folder.path)
+        // Run the audio encoder on the GPU rather than the Neural Engine. WhisperKit
+        // defaults the encoder to `.cpuAndNeuralEngine`, which triggers a one-time
+        // on-device ANE compilation that, for the large Whisper encoders (e.g.
+        // large-v3-turbo), can peg ANECompilerService for many minutes on first load
+        // and makes the app look hung on "Preparing model…". `.cpuAndGPU` skips that
+        // compile and loads in seconds, at a small inference-speed cost. The decoder
+        // stays on the ANE (its compile is fast) for good runtime throughput.
+        let computeOptions = ModelComputeOptions(audioEncoderCompute: .cpuAndGPU)
+        let config = WhisperKitConfig(modelFolder: folder.path, computeOptions: computeOptions)
         let kit = try await WhisperKit(config)
         return WhisperKitTranscriber(whisperKit: kit)
     }

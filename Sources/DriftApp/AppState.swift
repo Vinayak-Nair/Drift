@@ -24,6 +24,9 @@ final class AppState: ObservableObject {
     }
 
     @Published private(set) var status: Status = .needsSetup
+    /// True once a model load has been running long enough to warrant reassuring
+    /// the user (first-run CoreML compile). Drives the "Preparing model…" copy.
+    @Published private(set) var modelLoadIsSlow = false
     @Published private(set) var micGranted = false
     @Published private(set) var accessibilityGranted = false
     @Published private(set) var inputMonitoringGranted = false
@@ -59,6 +62,9 @@ final class AppState: ObservableObject {
     private var overlayWindow: NSPanel?
     private var streamingStartTask: Task<Void, Never>?
     private var streamingStartFailed = false
+    /// Fires while a model is loading; flips `modelLoadIsSlow` so the status copy
+    /// reassures the user instead of looking frozen during a slow first-run load.
+    private var longLoadWatchdog: Task<Void, Never>?
     private let transcriptHistoryKey = "transcriptHistory"
     private let transcriptHistoryLimit = 100
     private let recentAppsKey = "recentTargetApps"
@@ -125,7 +131,10 @@ final class AppState: ObservableObject {
 
     func loadModel(variant: String? = nil) async {
         let target = variant ?? settings.modelVariant
-        status = modelManager.isSelectedModelDownloaded(variant: target) ? .loadingModel : .downloadingModel(0)
+        let downloaded = modelManager.isSelectedModelDownloaded(variant: target)
+        status = downloaded ? .loadingModel : .downloadingModel(0)
+        startLoadWatchdog(active: downloaded)
+        defer { stopLoadWatchdog() }
         do {
             let transcriber = try await modelManager.loadTranscriber(variant: target) { [weak self] frac in
                 Task { @MainActor in self?.status = .downloadingModel(frac) }
@@ -135,6 +144,27 @@ final class AppState: ObservableObject {
         } catch {
             status = .error(error.localizedDescription)
         }
+    }
+
+    /// Starts a timer that, after a grace period, marks an in-progress load as slow
+    /// so the menu shows reassuring copy instead of a frozen "Preparing model…".
+    /// Only armed when the model is already downloaded (i.e. the wait is a load, not
+    /// a download that already shows its own progress percentage).
+    private func startLoadWatchdog(active: Bool) {
+        longLoadWatchdog?.cancel()
+        modelLoadIsSlow = false
+        guard active else { return }
+        longLoadWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(12))
+            guard !Task.isCancelled else { return }
+            self?.modelLoadIsSlow = true
+        }
+    }
+
+    private func stopLoadWatchdog() {
+        longLoadWatchdog?.cancel()
+        longLoadWatchdog = nil
+        modelLoadIsSlow = false
     }
 
     private func startHotkey() {
@@ -405,7 +435,7 @@ final class AppState: ObservableObject {
     func showLiveOverlay() {
         if overlayWindow == nil {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 120),
+                contentRect: NSRect(x: 0, y: 0, width: 600, height: 200),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -456,7 +486,8 @@ final class AppState: ObservableObject {
     var statusText: String {
         switch status {
         case .needsSetup: return "Setup required"
-        case .loadingModel: return "Loading model…"
+        case .loadingModel:
+            return modelLoadIsSlow ? "Preparing model… first run can take a minute" : "Preparing model…"
         case .downloadingModel(let p): return "Downloading model… \(Int(p * 100))%"
         case .idle: return "Ready. Hold \(keyName(settings.pttKeyCode)) to talk"
         case .recording: return "Recording…"
