@@ -16,7 +16,13 @@ struct DriftApp: App {
         MenuBarExtra {
             DriftMenu().environmentObject(state)
         } label: {
-            Image(systemName: state.menuBarSymbol)
+            // At rest, show Drift's own waveform mark; transient states keep the
+            // animated SF Symbols so recording/processing stay legible.
+            if state.isReady {
+                Image("MenuBarIcon")
+            } else {
+                Image(systemName: state.menuBarSymbol)
+            }
         }
         .menuBarExtraStyle(.menu)
     }

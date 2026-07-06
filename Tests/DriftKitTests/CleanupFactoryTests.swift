@@ -54,6 +54,20 @@ final class CleanupFactoryTests: XCTestCase {
         XCTAssertEqual(s.effectiveLanguage, .malayalam)
     }
 
+    func testIndicConformerBackendUsesSupportedSelectedLanguage() {
+        let s = makeSettings()
+        s.language = .bengali
+        s.transcriptionBackend = .indicConformer
+        XCTAssertEqual(s.effectiveLanguage, .bengali)
+    }
+
+    func testIndicConformerBackendFallsBackFromUnsupportedLanguage() {
+        let s = makeSettings()
+        s.language = .english
+        s.transcriptionBackend = .indicConformer
+        XCTAssertEqual(s.effectiveLanguage, .hindi)
+    }
+
     func testDefaultModelIsTurbo() {
         XCTAssertEqual(makeSettings().modelVariant, "openai_whisper-large-v3-v20240930")
     }

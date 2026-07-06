@@ -2,22 +2,25 @@ import SwiftUI
 
 // MARK: - Palette
 
-/// Drift's hand-tuned dark palette — an ink canvas with a cool aurora accent.
-/// Hardcoded (not semantic) so the signature look is identical across windows.
+/// Drift's hand-tuned dark palette — an ink canvas with a luminous teal-green
+/// brand accent. Hardcoded (not semantic) so the signature look is identical
+/// across windows.
 enum Ink {
     static func text(_ o: Double) -> Color { .white.opacity(o) }
 
     static let bgTop = Color(red: 0.070, green: 0.072, blue: 0.090)
     static let bgBottom = Color(red: 0.032, green: 0.033, blue: 0.046)
 
-    static let aCyan = Color(red: 0.42, green: 0.66, blue: 1.00)
-    static let aIndigo = Color(red: 0.55, green: 0.49, blue: 1.00)
-    static let aViolet = Color(red: 0.78, green: 0.49, blue: 1.00)
+    // The brand: one teal-green hue in three shades, darkest to lightest. Every
+    // accent in the app is built from these so the colour reads as a single brand.
+    static let brandDeep = Color(red: 0.06, green: 0.52, blue: 0.52)
+    static let brand = Color(red: 0.12, green: 0.80, blue: 0.68)
+    static let brandLight = Color(red: 0.46, green: 0.95, blue: 0.82)
 
-    static let accentSolid = aIndigo
-    static let accentGlow = aIndigo
+    static let accentSolid = brand
+    static let accentGlow = brand
     static let accentGradient = LinearGradient(
-        colors: [aCyan, aIndigo, aViolet],
+        colors: [brandLight, brand, brandDeep],
         startPoint: .topLeading, endPoint: .bottomTrailing
     )
 
@@ -40,11 +43,11 @@ struct InkCanvas: View {
                 center: .top, startRadius: 0, endRadius: 760
             )
             RadialGradient(
-                colors: [Ink.aCyan.opacity(0.10), .clear],
+                colors: [Ink.brandLight.opacity(0.10), .clear],
                 center: .bottomTrailing, startRadius: 0, endRadius: 620
             )
         }
-        .animation(.smooth(duration: 0.7), value: active)
+        .animation(.easeOut(duration: 0.4), value: active)
     }
 }
 
@@ -128,7 +131,7 @@ struct SoftButton: View {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(stroke, lineWidth: 1))
                 .foregroundStyle(foreground)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
     }
@@ -147,6 +150,21 @@ struct SoftButton: View {
         if prominent { return .white }
         return role == .destructive ? Ink.red : Ink.text(0.9)
     }
+}
+
+/// Gives any pressable surface instant press feedback: a subtle scale-down so the
+/// UI feels like it heard the click. Hover styling stays on the views themselves;
+/// this only adds the press response, so it composes with `.plain`-style labels.
+struct PressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.13), value: configuration.isPressed)
+    }
+}
+
+extension ButtonStyle where Self == PressableButtonStyle {
+    static var pressable: PressableButtonStyle { PressableButtonStyle() }
 }
 
 /// A keyboard-key chip, e.g. for the push-to-talk key.
@@ -170,6 +188,7 @@ struct AuraOrb: View {
     let recording: Bool
     let busy: Bool
     @State private var breathe = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -179,7 +198,7 @@ struct AuraOrb: View {
                 .blur(radius: diameter * 0.42)
                 .opacity(breathe ? (recording ? 0.95 : 0.5) : (recording ? 0.7 : 0.32))
 
-            if recording {
+            if recording && !reduceMotion {
                 PulseRing(diameter: diameter, delay: 0)
                 PulseRing(diameter: diameter, delay: 0.6)
             }
@@ -201,6 +220,7 @@ struct AuraOrb: View {
         }
         .frame(width: diameter, height: diameter)
         .onAppear {
+            guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) { breathe = true }
         }
     }
@@ -234,49 +254,175 @@ struct BusyArc: View {
             .frame(width: diameter * 0.92, height: diameter * 0.92)
             .rotationEffect(.degrees(spin ? 360 : 0))
             .onAppear {
-                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { spin = true }
+                withAnimation(.linear(duration: 0.7).repeatForever(autoreverses: false)) { spin = true }
             }
     }
 }
 
 // MARK: - Live waveform
 
-/// A continuously animated voice waveform. Energetic while `active`, a calm
-/// breathing line otherwise. Synthetic (not tied to mic levels) but lively.
+/// A flowing glowing ribbon: a few translucent teal strands sharing a spindle
+/// envelope (tapering to points at both ends, billowing in the middle) with a
+/// soft bloom. The strands flow and interweave; the live FFT gently shapes where
+/// the ribbon swells. Gated by loudness — a fine glowing line in silence, a
+/// living ribbon while you speak. Designed for a dark background.
+///
+/// The mic level and spectrum only arrive ~12×/sec; a per-frame `WaveMotion`
+/// eases them toward their targets every frame (fast attack so it blooms on
+/// intensity, slow release so the flow stays buttery) decoupled from that rate.
 struct LiveWaveform: View {
     var active: Bool
-    var barCount: Int = 14
+    var level: Double = 0
+    var spectrum: [Double] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var motion = WaveMotion()
+
+    /// Each strand is a travelling sine of its own frequency/speed/phase; layering
+    /// a few at different weights and opacities creates the interweaving ribbon.
+    private struct Strand {
+        let freq: Double, speed: Double, phase: Double
+        let amp: Double, opacity: Double, width: Double
+    }
+    private static let strands: [Strand] = [
+        .init(freq: 0.7, speed:  1.1,  phase: 0.0, amp: 1.00, opacity: 0.95, width: 1.6),
+        .init(freq: 1.0, speed: -0.85, phase: 1.6, amp: 0.85, opacity: 0.55, width: 1.3),
+        .init(freq: 1.3, speed:  1.4,  phase: 3.0, amp: 0.62, opacity: 0.42, width: 1.1),
+        .init(freq: 0.5, speed: -1.0,  phase: 4.5, amp: 0.72, opacity: 0.32, width: 1.0),
+    ]
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 120.0)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
-            GeometryReader { geo in
-                let h = geo.size.height
-                // Size bars to the frame so they always fill it edge to edge.
-                let spacing = geo.size.width / CGFloat(barCount) * 0.42
-                let barWidth = (geo.size.width - spacing * CGFloat(barCount - 1)) / CGFloat(barCount)
-                HStack(spacing: spacing) {
-                    ForEach(0..<barCount, id: \.self) { i in
-                        Capsule()
-                            .fill(Ink.accentGradient)
-                            .frame(width: barWidth, height: barHeight(i, t: t, maxH: h))
-                            .opacity(active ? 1 : 0.7)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            // Ease amplitude/spectrum toward the latest mic targets so motion is
+            // smooth at display rate, not the 12 Hz audio rate.
+            let frame = motion.step(towardLevel: level, spectrum: spectrum, time: t)
+            // The lateral flow is decorative; freeze it under reduced motion but
+            // keep amplitude responding to the voice (that's functional).
+            let flowT = reduceMotion ? 0 : t
+            ZStack {
+                ribbon(flowT, frame.level, frame.spectrum)
+                    .blur(radius: 3).opacity(0.25 + 0.4 * frame.level)  // soft bloom, brightens when loud
+                ribbon(flowT, frame.level, frame.spectrum)              // crisp
             }
         }
     }
 
-    private func barHeight(_ i: Int, t: Double, maxH: CGFloat) -> CGFloat {
-        // Bell envelope so the centre bars are tallest, edges shortest.
-        let envelope = sin(Double(i) / Double(barCount - 1) * .pi)
-        let speed = active ? 7.0 : 2.2
-        let amp = active ? 1.0 : 0.28
-        let wobble = 0.5 + 0.5 * sin(t * speed + Double(i) * 0.55)
-        let secondary = 0.5 + 0.5 * sin(t * speed * 0.6 + Double(i) * 0.9)
-        let value = envelope * amp * (0.55 * wobble + 0.45 * secondary)
-        return max(2.5, CGFloat(value) * maxH)
+    private func ribbon(_ t: Double, _ level: Double, _ spectrum: [Double]) -> some View {
+        Canvas { ctx, size in
+            let midY = size.height / 2
+            let maxAmp = size.height / 2 - 1
+            let steps = 48
+
+            for strand in Self.strands {
+                var points: [CGPoint] = []
+                points.reserveCapacity(steps + 1)
+                for s in 0...steps {
+                    let fx = Double(s) / Double(steps)
+                    let envelope = sin(fx * .pi)            // spindle: 0 at ends, 1 in middle
+                    // A single clean sine sweep per strand — smooth, no ripple or
+                    // FFT bumps. Amplitude is the overall loudness, gated by level
+                    // so silence is a flat glowing line.
+                    let wave = sin(fx * .pi * 2 * strand.freq + t * strand.speed + strand.phase)
+                    let y = midY + envelope * strand.amp * level * maxAmp * wave
+                    points.append(CGPoint(x: fx * size.width, y: y))
+                }
+                ctx.stroke(Self.smoothCurve(points),
+                           with: horizontalShading(opacity: strand.opacity, width: size.width, midY: midY),
+                           style: StrokeStyle(lineWidth: strand.width, lineCap: .round, lineJoin: .round))
+            }
+
+            // Bright central core, brightest in the middle, fading at the ends.
+            var core = Path()
+            core.move(to: CGPoint(x: 0, y: midY))
+            core.addLine(to: CGPoint(x: size.width, y: midY))
+            ctx.stroke(core, with: .linearGradient(
+                Gradient(stops: [
+                    .init(color: .clear, location: 0.0),
+                    .init(color: Ink.brandLight.opacity(0.5 * (0.4 + 0.6 * level)), location: 0.5),
+                    .init(color: .clear, location: 1.0),
+                ]),
+                startPoint: CGPoint(x: 0, y: midY), endPoint: CGPoint(x: size.width, y: midY)
+            ), lineWidth: 1)
+        }
+    }
+
+    /// Brand-coloured gradient along the ribbon: transparent at the tapered ends,
+    /// deep teal toward the edges, bright mint through the centre.
+    private func horizontalShading(opacity: Double, width: CGFloat, midY: CGFloat) -> GraphicsContext.Shading {
+        .linearGradient(
+            Gradient(stops: [
+                .init(color: .clear, location: 0.0),
+                .init(color: Ink.brandDeep.opacity(opacity), location: 0.14),
+                .init(color: Ink.brandLight.opacity(opacity), location: 0.5),
+                .init(color: Ink.brandDeep.opacity(opacity), location: 0.86),
+                .init(color: .clear, location: 1.0),
+            ]),
+            startPoint: CGPoint(x: 0, y: midY), endPoint: CGPoint(x: width, y: midY)
+        )
+    }
+
+    /// Builds a smooth path through `points` using a Catmull-Rom spline rendered
+    /// as cubic Béziers, so the strokes flow as curves instead of line segments.
+    private static func smoothCurve(_ points: [CGPoint]) -> Path {
+        var path = Path()
+        guard points.count > 1 else { return path }
+        path.move(to: points[0])
+        for i in 0..<points.count - 1 {
+            let p0 = points[i == 0 ? i : i - 1]
+            let p1 = points[i]
+            let p2 = points[i + 1]
+            let p3 = points[i + 2 < points.count ? i + 2 : i + 1]
+            let c1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+            let c2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            path.addCurve(to: p2, control1: c1, control2: c2)
+        }
+        return path
+    }
+
+    /// Smoothly samples a spectrum at `d` (0 = centre/bass, 1 = edge/treble).
+    private static func sampledSpectrum(_ spectrum: [Double], _ d: Double) -> Double {
+        guard spectrum.count > 1 else { return 0 }
+        let pos = min(max(d, 0), 1) * Double(spectrum.count - 1)
+        let i = Int(pos)
+        let f = pos - Double(i)
+        let a = spectrum[i]
+        let b = spectrum[min(i + 1, spectrum.count - 1)]
+        let smooth = f * f * (3 - 2 * f)   // smoothstep for a fluid curve
+        return a + (b - a) * smooth
+    }
+}
+
+/// Per-frame easing of the waveform's amplitude and spectrum. Because the mic
+/// data arrives at ~12 Hz, this interpolates toward the latest targets at the
+/// display's frame rate using frame-rate-independent exponential smoothing —
+/// fast attack so the amplitude pops on a loud syllable, slower release so it
+/// settles smoothly. This is what makes the ribbon feel buttery rather than
+/// stepping between audio frames.
+final class WaveMotion {
+    private var level: Double = 0
+    private var spectrum: [Double] = []
+    private var lastTime: Double = 0
+
+    /// Advances the eased values toward the latest targets and returns them.
+    func step(towardLevel targetLevel: Double, spectrum targetSpectrum: [Double], time: Double) -> (level: Double, spectrum: [Double]) {
+        let dt = lastTime == 0 ? 1.0 / 60.0 : min(0.1, max(0.0001, time - lastTime))
+        lastTime = time
+
+        // Time constants: ~38 ms attack (snappy jump), ~190 ms release (smooth).
+        let attack = 1 - exp(-dt / 0.038)
+        let release = 1 - exp(-dt / 0.190)
+
+        level += (targetLevel - level) * (targetLevel > level ? attack : release)
+
+        if spectrum.count != targetSpectrum.count {
+            spectrum = targetSpectrum
+        } else {
+            for i in spectrum.indices {
+                let target = targetSpectrum[i]
+                spectrum[i] += (target - spectrum[i]) * (target > spectrum[i] ? attack : release)
+            }
+        }
+        return (level, spectrum)
     }
 }
 
@@ -286,10 +432,11 @@ struct StatusBadge: View {
     let text: String
     let color: Color
     let pulsing: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         HStack(spacing: 7) {
             ZStack {
-                if pulsing { PulseDot(color: color) }
+                if pulsing && !reduceMotion { PulseDot(color: color) }
                 Circle().fill(color).frame(width: 8, height: 8)
             }
             Text(text).font(.caption.weight(.semibold)).contentTransition(.opacity).id(text)

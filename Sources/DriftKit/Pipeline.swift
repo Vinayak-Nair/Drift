@@ -18,6 +18,19 @@ public final class Pipeline {
     /// Whether the active engine supports live partial transcription.
     public var supportsStreaming: Bool { transcriber is StreamingTranscriber }
 
+    /// Live input loudness (0...1) for UI meters, forwarded from the recorder.
+    /// Set once; applies to both streaming and batch recording. Called on the
+    /// audio thread, so hop to the main actor before touching UI state.
+    public var onAudioLevel: ((Float) -> Void)? {
+        didSet { recorder.onLevel = onAudioLevel }
+    }
+
+    /// Live frequency spectrum (relative band magnitudes, 0...1) for UI meters,
+    /// forwarded from the recorder. Called on the audio thread.
+    public var onAudioSpectrum: (([Float]) -> Void)? {
+        didSet { recorder.onSpectrum = onAudioSpectrum }
+    }
+
     public func startRecording() throws {
         try recorder.start()
     }
@@ -78,11 +91,15 @@ public final class Pipeline {
     private func clean(_ text: String, targetBundleID: String?) async -> String {
         let language = settings.effectiveLanguage
         let profile = FormattingProfiles.resolve(bundleID: targetBundleID, settings: settings)
-        let prepared = applyCommandMode(to: text, language: language)
+        var prepared = applyCommandMode(to: text, language: language)
 
         // Code destinations are inserted verbatim — never reshaped, never sent to
         // a cloud provider.
         if profile.style == .code { return prepared }
+
+        // Phonetic dictionary pass runs before cleanup so every provider (including
+        // fully on-device) sees "Karan Johar" instead of "current johar".
+        prepared = VocabularyCorrector.correct(prepared, vocabulary: settings.customVocabulary)
 
         let cleaner = CleanupFactory.make(settings: settings, profile: profile)
         var result: String

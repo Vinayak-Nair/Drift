@@ -52,13 +52,15 @@ public enum CleanupFactory {
                 baseURL: settings.openAIBaseURL,
                 model: settings.openAIModel,
                 apiKey: settings.openAIKey,
-                tone: profile.tone
+                tone: profile.tone,
+                vocabulary: settings.customVocabulary
             )
         case "ollama":
             return OllamaCleanup(
                 baseURL: settings.ollamaBaseURL,
                 model: settings.ollamaModel,
-                tone: profile.tone
+                tone: profile.tone,
+                vocabulary: settings.customVocabulary
             )
         default:
             return DeterministicCleanup()
@@ -69,7 +71,7 @@ public enum CleanupFactory {
 /// Shared instruction used by every LLM-backed provider. Crucially tells the
 /// model to keep the original language and script (so Malayalam stays Malayalam).
 enum CleanupPrompt {
-    static func system(for language: Language, tone: String? = nil) -> String {
+    static func system(for language: Language, tone: String? = nil, vocabulary: [String] = []) -> String {
         let langClause: String
         if language.isAuto {
             langClause = "the same language and script as the input"
@@ -85,6 +87,9 @@ enum CleanupPrompt {
         """
         if let tone, !tone.isEmpty {
             prompt += " \(tone)"
+        }
+        if let clause = Vocabulary.cleanupClause(terms: vocabulary) {
+            prompt += " \(clause)"
         }
         return prompt
     }

@@ -12,12 +12,14 @@ public struct OpenAICompatibleCleanup: CleanupProvider {
     let model: String
     let apiKey: String
     let tone: String?
+    let vocabulary: [String]
 
-    public init(baseURL: String, model: String, apiKey: String, tone: String? = nil) {
+    public init(baseURL: String, model: String, apiKey: String, tone: String? = nil, vocabulary: [String] = []) {
         self.baseURL = baseURL
         self.model = model
         self.apiKey = apiKey
         self.tone = tone
+        self.vocabulary = vocabulary
     }
 
     public func clean(_ text: String, language: Language) async throws -> String {
@@ -37,7 +39,7 @@ public struct OpenAICompatibleCleanup: CleanupProvider {
             "model": model,
             "temperature": 0.2,
             "messages": [
-                ["role": "system", "content": CleanupPrompt.system(for: language, tone: tone)],
+                ["role": "system", "content": CleanupPrompt.system(for: language, tone: tone, vocabulary: vocabulary)],
                 ["role": "user", "content": text],
             ],
         ]

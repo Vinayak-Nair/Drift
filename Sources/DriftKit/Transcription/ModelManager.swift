@@ -41,6 +41,8 @@ public final class ModelManager {
             return isFluidAudioEnglishDownloaded
         case .nemotronEnglish:
             return isNemotronEnglishDownloaded
+        case .indicConformer:
+            return true
         case .whisperKit:
             return isDownloaded(requested ?? settings.modelVariant)
         }
@@ -58,6 +60,8 @@ public final class ModelManager {
             return try await loadFluidAudioEnglishTranscriber(onProgress: onProgress)
         case .nemotronEnglish:
             return try await loadNemotronEnglishTranscriber(onProgress: onProgress)
+        case .indicConformer:
+            return try await loadIndicConformerTranscriber()
         case .whisperKit:
             return try await loadWhisperKitTranscriber(variant: requested, onProgress: onProgress)
         }
@@ -159,6 +163,31 @@ public final class ModelManager {
         return NemotronEnglishTranscriber(manager: manager)
     }
 
+    // MARK: AI4Bharat IndicConformer (local Python worker)
+
+    private var indicConformerDirectory: URL {
+        modelsDirectory.appendingPathComponent("IndicConformer", isDirectory: true)
+    }
+
+    private func loadIndicConformerTranscriber() async throws -> Transcriber {
+        guard let scriptURL = Bundle.module.url(
+            forResource: "indic_conformer_worker",
+            withExtension: "py"
+        ) else {
+            throw IndicConformerError.missingWorkerScript
+        }
+        try FileManager.default.createDirectory(
+            at: indicConformerDirectory, withIntermediateDirectories: true
+        )
+        let transcriber = IndicConformerTranscriber(
+            workerScriptURL: scriptURL,
+            workingDirectory: indicConformerDirectory,
+            settings: settings
+        )
+        try await transcriber.prepare()
+        return transcriber
+    }
+
     private func loadWhisperKitTranscriber(
         variant requested: String? = nil,
         onProgress: ((Double) -> Void)? = nil
@@ -194,6 +223,10 @@ public final class ModelManager {
         let computeOptions = ModelComputeOptions(audioEncoderCompute: .cpuAndGPU)
         let config = WhisperKitConfig(modelFolder: folder.path, computeOptions: computeOptions)
         let kit = try await WhisperKit(config)
-        return WhisperKitTranscriber(whisperKit: kit)
+        let settings = self.settings
+        return WhisperKitTranscriber(
+            whisperKit: kit,
+            vocabularyProvider: { settings.customVocabulary }
+        )
     }
 }

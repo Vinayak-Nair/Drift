@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Floating, click-through HUD shown while dictation is active. A compact pill
-/// that hugs its content: just a waveform while listening, growing to show the
-/// live partial transcript for streaming engines, then a transcribing state.
+/// Floating, click-through HUD shown while dictation is active. A compact glass
+/// pill that hugs its content: a flowing glowing wave while listening, growing
+/// to show the live partial transcript for streaming engines, then a
+/// transcribing state.
 struct LiveOverlayView: View {
     @EnvironmentObject var state: AppState
 
@@ -27,32 +28,34 @@ struct LiveOverlayView: View {
     }
 
     private var listening: some View {
-        card(expanded: hasText) {
+        Group {
             if hasText {
-                VStack(alignment: .leading, spacing: 10) {
-                    header
-                    Text(state.livePartialText)
-                        .font(.title3.weight(.medium))
-                        .foregroundStyle(.white)
-                        .lineLimit(3)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: 440, alignment: .leading)
+                card(expanded: true) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            waveform
+                            Text("Listening…")
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(Ink.text(0.55))
+                        }
+                        Text(state.livePartialText)
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(.white)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: 440, alignment: .leading)
+                    }
                 }
             } else {
-                header
+                // Compact, Wispr-sized: just the small glowing wave, no label.
+                card(expanded: false) { waveform }
             }
         }
     }
 
-    /// Brand mark for the active state: the live waveform plus a quiet label.
-    private var header: some View {
-        HStack(spacing: 10) {
-            LiveWaveform(active: true)
-                .frame(width: 52, height: 16)
-            Text("Listening…")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(Ink.text(0.55))
-        }
+    private var waveform: some View {
+        LiveWaveform(active: true, level: state.audioLevel, spectrum: state.audioSpectrum)
+            .frame(width: 64, height: 18)
     }
 
     private var transcribing: some View {
@@ -66,14 +69,13 @@ struct LiveOverlayView: View {
         }
     }
 
-    /// A content-hugging glass pill. Reads as a capsule when compact and a soft
-    /// card once it grows, sharing the house glass treatment from the rest of
-    /// the app. One quiet shadow, no accent glow.
+    /// A content-hugging dark glass pill with a top-lit hairline border and one
+    /// quiet shadow, so the glowing wave reads against it.
     private func card<Content: View>(expanded: Bool, @ViewBuilder _ content: () -> Content) -> some View {
         let corner: CGFloat = 22
         return content()
-            .padding(.horizontal, 20)
-            .padding(.vertical, expanded ? 15 : 11)
+            .padding(.horizontal, expanded ? 20 : 14)
+            .padding(.vertical, expanded ? 15 : 9)
             .background(
                 RoundedRectangle(cornerRadius: corner, style: .continuous)
                     .fill(Ink.bgTop.opacity(0.7))

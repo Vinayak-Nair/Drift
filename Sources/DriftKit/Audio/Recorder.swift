@@ -4,10 +4,20 @@ import CoreAudio
 
 /// Captures microphone audio and returns 16 kHz mono Float samples, the format
 /// WhisperKit's `transcribe(audioArray:)` expects. No temp files involved.
+///
+/// Capture runs on an AudioQueue by default, for both the automatic device and
+/// an explicitly selected microphone: an input queue starts much faster than an
+/// AVAudioEngine graph, so the mic is hot almost as soon as the hotkey goes
+/// down. The engine path is kept as an automatic fallback for devices or
+/// drivers the queue can't start on.
 public final class Recorder {
     public enum RecorderError: Error { case engineFailedToStart }
 
+    private enum Backend { case audioQueue, engine }
+
     private let engine = AVAudioEngine()
+    private let audioQueue = AudioQueueCapture()
+    private var activeBackend: Backend?
     private var converter: AVAudioConverter?
     private var samples: [Float] = []
     private let targetSampleRate: Double = 16_000
@@ -21,15 +31,79 @@ public final class Recorder {
     /// by streaming transcription. Called on the audio thread.
     public var onSamples: (([Float]) -> Void)?
 
+    /// Optional live level meter: called with a perceptual 0...1 loudness for each
+    /// captured chunk, for driving a reactive waveform. Called on the audio thread.
+    public var onLevel: ((Float) -> Void)?
+
+    /// Optional live frequency spectrum: called with the relative band magnitudes
+    /// (0...1) of the latest audio for a spectrum visualization. Audio thread.
+    public var onSpectrum: (([Float]) -> Void)?
+    private let spectrum = SpectrumAnalyzer()
+
     public init(settings: Settings = .shared) {
         self.settings = settings
     }
 
-    /// Begins capture. Throws if the audio engine can't start (e.g. mic denied).
+    /// Begins capture. Throws if no capture path can start (e.g. mic denied).
     public func start() throws {
         guard !isRecording else { return }
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
+        if settings.recorderUsesAudioQueue, startAudioQueue() {
+            activeBackend = .audioQueue
+            isRecording = true
+            return
+        }
+
+        try startEngine()
+        activeBackend = .engine
+        isRecording = true
+    }
+
+    /// Stops capture and returns the captured samples. Returns an empty array if
+    /// the clip was too short to be meaningful (< 0.2 s).
+    public func stop() -> [Float] {
+        guard isRecording else { return [] }
+        switch activeBackend {
+        case .audioQueue:
+            audioQueue.stop()
+        case .engine, nil:
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        activeBackend = nil
+        isRecording = false
+
+        lock.lock(); let captured = samples; lock.unlock()
+        guard captured.count > Int(targetSampleRate * 0.2) else { return [] }
+        return captured
+    }
+
+    // MARK: AudioQueue path (default)
+
+    private func startAudioQueue() -> Bool {
+        audioQueue.onChunk = { [weak self] chunk in self?.process(chunk: chunk) }
+        do {
+            try audioQueue.start(deviceUID: selectedDeviceUID())
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// UID for the queue's device selection: nil means the system default input,
+    /// used both for "Automatic" and when the remembered device is unplugged
+    /// (matching the engine path, which also falls back to the default then).
+    private func selectedDeviceUID() -> String? {
+        let selection = settings.inputDeviceID
+        guard selection != AudioInputDevice.systemDefaultID else { return nil }
+        guard AudioInputDevices.deviceID(for: selection) != nil else { return nil }
+        return selection
+    }
+
+    // MARK: AVAudioEngine path (fallback)
+
+    private func startEngine() throws {
         let input = engine.inputNode
         try applySelectedInputDevice(to: input)
         let inputFormat = input.outputFormat(forBus: 0)
@@ -50,24 +124,10 @@ public final class Recorder {
         engine.prepare()
         do {
             try engine.start()
-            isRecording = true
         } catch {
             input.removeTap(onBus: 0)
             throw RecorderError.engineFailedToStart
         }
-    }
-
-    /// Stops capture and returns the captured samples. Returns an empty array if
-    /// the clip was too short to be meaningful (< 0.2 s).
-    public func stop() -> [Float] {
-        guard isRecording else { return [] }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        isRecording = false
-
-        lock.lock(); let captured = samples; lock.unlock()
-        guard captured.count > Int(targetSampleRate * 0.2) else { return [] }
-        return captured
     }
 
     private func append(buffer: AVAudioPCMBuffer, outputFormat: AVAudioFormat) {
@@ -89,11 +149,44 @@ public final class Recorder {
 
         guard let channel = out.floatChannelData?[0] else { return }
         let frames = Int(out.frameLength)
-        let chunk = Array(UnsafeBufferPointer(start: channel, count: frames))
+        process(chunk: Array(UnsafeBufferPointer(start: channel, count: frames)))
+    }
+
+    // MARK: Shared chunk handling
+
+    /// Accumulates a 16 kHz mono chunk and feeds the live taps. Both capture
+    /// paths land here, on their respective audio threads.
+    private func process(chunk: [Float]) {
+        guard !chunk.isEmpty else { return }
         lock.lock()
         samples.append(contentsOf: chunk)
         lock.unlock()
         onSamples?(chunk)
+
+        if let onLevel {
+            var sumSquares: Float = 0
+            for s in chunk { sumSquares += s * s }
+            let rms = (sumSquares / Float(chunk.count)).squareRoot()
+            onLevel(Recorder.normalizedLevel(rms: rms))
+        }
+
+        if let onSpectrum, let bands = spectrum.process(chunk) {
+            onSpectrum(bands)
+        }
+    }
+
+    /// Maps RMS amplitude to a perceptual 0...1 level. A quiet room sits at 0;
+    /// normal speech fills most of the range. Tuned on a dB scale so the meter
+    /// tracks perceived loudness rather than raw amplitude.
+    private static func normalizedLevel(rms: Float) -> Float {
+        guard rms > 0 else { return 0 }
+        let db = 20 * log10(rms)
+        let floor: Float = -52    // at/below this we treat the input as silent
+        let ceiling: Float = -22  // at/above this the meter is full (normal speech)
+        let norm = min(1, max(0, (db - floor) / (ceiling - floor)))
+        // Gentle gamma so soft and normal speech climb higher rather than hugging
+        // the lower half of the range.
+        return pow(norm, 0.7)
     }
 
     private func applySelectedInputDevice(to input: AVAudioInputNode) throws {

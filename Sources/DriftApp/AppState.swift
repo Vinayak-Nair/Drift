@@ -33,6 +33,13 @@ final class AppState: ObservableObject {
     @Published private(set) var lastText = ""
     /// Live partial transcript shown in the overlay while streaming (Nemotron).
     @Published private(set) var livePartialText = ""
+    /// Live mic loudness (0...1) driving the overlay waveform. Smoothed with a
+    /// fast attack / slow release so the wave jumps to life on speech and eases
+    /// back to a flat line in silence.
+    @Published private(set) var audioLevel: Double = 0
+    /// Live frequency spectrum (relative band magnitudes, 0...1) shaping the
+    /// waveform so it reflects the actual content of your voice, not just volume.
+    @Published private(set) var audioSpectrum: [Double] = Array(repeating: 0, count: 24)
     @Published private(set) var transcriptHistory: [TranscriptEntry]
     @Published private(set) var recentTargetApps: [TargetApp]
     @Published private(set) var availableMicrophones: [AudioInputDevice]
@@ -50,6 +57,10 @@ final class AppState: ObservableObject {
     @Published var openAIKey: String { didSet { settings.openAIKey = openAIKey } }
     @Published var ollamaBaseURL: String { didSet { settings.ollamaBaseURL = ollamaBaseURL } }
     @Published var ollamaModel: String { didSet { settings.ollamaModel = ollamaModel } }
+    @Published var indicConformerPythonPath: String { didSet { settings.indicConformerPythonPath = indicConformerPythonPath } }
+    @Published var indicConformerModelID: String { didSet { settings.indicConformerModelID = indicConformerModelID } }
+    @Published var indicConformerDecoder: String { didSet { settings.indicConformerDecoder = indicConformerDecoder } }
+    @Published var customVocabularyRaw: String { didSet { settings.customVocabularyRaw = customVocabularyRaw } }
     @Published private(set) var transcriptionBackendID: String
     @Published private(set) var modelVariant: String
 
@@ -60,6 +71,10 @@ final class AppState: ObservableObject {
     private var onboardingWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var overlayWindow: NSPanel?
+    /// Terms shown in the "Added to dictionary" toast (empty = no toast).
+    @Published private(set) var learnedToastTerms: [String] = []
+    private var learnedToastWindow: NSPanel?
+    private var learnedToastDismissTask: Task<Void, Never>?
     private var streamingStartTask: Task<Void, Never>?
     private var streamingStartFailed = false
     /// Fires while a model is loading; flips `modelLoadIsSlow` so the status copy
@@ -72,6 +87,8 @@ final class AppState: ObservableObject {
     /// Bundle id of the app frontmost when the current dictation started; drives
     /// the per-app formatting profile applied at paste time.
     private var currentTargetBundleID: String?
+    /// Learns dictionary terms from corrections the user makes after pasting.
+    private let correctionWatcher = CorrectionWatcher()
 
     private init() {
         let s = Settings.shared
@@ -85,6 +102,10 @@ final class AppState: ObservableObject {
         openAIKey = s.openAIKey
         ollamaBaseURL = s.ollamaBaseURL
         ollamaModel = s.ollamaModel
+        indicConformerPythonPath = s.indicConformerPythonPath
+        indicConformerModelID = s.indicConformerModelID
+        indicConformerDecoder = s.indicConformerDecoder
+        customVocabularyRaw = s.customVocabularyRaw
         transcriptionBackendID = s.transcriptionBackendID
         modelVariant = s.modelVariant
         transcriptHistory = Self.loadTranscriptHistory()
@@ -139,7 +160,14 @@ final class AppState: ObservableObject {
             let transcriber = try await modelManager.loadTranscriber(variant: target) { [weak self] frac in
                 Task { @MainActor in self?.status = .downloadingModel(frac) }
             }
-            pipeline = Pipeline(transcriber: transcriber, settings: settings)
+            let newPipeline = Pipeline(transcriber: transcriber, settings: settings)
+            newPipeline.onAudioLevel = { [weak self] level in
+                Task { @MainActor in self?.applyAudioLevel(Double(level)) }
+            }
+            newPipeline.onAudioSpectrum = { [weak self] bands in
+                Task { @MainActor in self?.applySpectrum(bands.map(Double.init)) }
+            }
+            pipeline = newPipeline
             status = .idle
         } catch {
             status = .error(error.localizedDescription)
@@ -250,6 +278,11 @@ final class AppState: ObservableObject {
                 recordTranscript(text)
                 Paster.paste(text)
                 Feedback.success()
+                correctionWatcher.watch(
+                    pasted: text,
+                    vocabulary: { [settings] in settings.customVocabulary },
+                    onLearn: { [weak self] terms in self?.learnVocabulary(terms) }
+                )
             }
         } catch {
             hideLiveOverlay()
@@ -258,12 +291,127 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: Dictionary learning
+
+    /// Adds terms learned from user corrections to the dictionary and surfaces
+    /// them in a floating toast (with Remove to undo). A term that already
+    /// exists with different casing is updated in place ("vinayak" becomes
+    /// "Vinayak") rather than duplicated.
+    func learnVocabulary(_ terms: [String]) {
+        var entries = Vocabulary.parse(settings.customVocabularyRaw)
+        var applied: [String] = []
+        for term in terms {
+            if let index = entries.firstIndex(where: { $0.lowercased() == term.lowercased() }) {
+                if entries[index] != term {
+                    entries[index] = term
+                    applied.append(term)
+                }
+            } else {
+                entries.append(term)
+                applied.append(term)
+            }
+        }
+        guard !applied.isEmpty else { return }
+        customVocabularyRaw = entries.joined(separator: "\n")
+        showLearnedToast(applied)
+    }
+
+    /// Removes a dictionary entry (case-insensitive). Used by the toast's Remove.
+    func removeVocabularyTerm(_ term: String) {
+        let entries = Vocabulary.parse(settings.customVocabularyRaw)
+            .filter { $0.lowercased() != term.lowercased() }
+        customVocabularyRaw = entries.joined(separator: "\n")
+    }
+
+    // MARK: Learned-term toast
+
+    /// Shows a small floating card (top-right) confirming what auto-learning
+    /// just added, so a wrong guess is one click to undo. Auto-fades after a
+    /// few seconds; x dismisses immediately.
+    private func showLearnedToast(_ terms: [String]) {
+        learnedToastTerms = terms
+        learnedToastDismissTask?.cancel()
+
+        if learnedToastWindow == nil {
+            let panel = NSPanel(
+                contentRect: .zero,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.level = .floating
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = false // the SwiftUI card draws its own shadow
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.hidesOnDeactivate = false
+            panel.isReleasedWhenClosed = false
+            panel.contentView = NSHostingView(rootView: LearnedToastView().environmentObject(self))
+            learnedToastWindow = panel
+        }
+        guard let panel = learnedToastWindow else { return }
+        layoutLearnedToast()
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            panel.animator().alphaValue = 1
+        }
+
+        learnedToastDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled else { return }
+            self?.dismissLearnedToast()
+        }
+    }
+
+    func dismissLearnedToast() {
+        learnedToastDismissTask?.cancel()
+        learnedToastDismissTask = nil
+        guard let panel = learnedToastWindow, panel.isVisible else { return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.18
+            panel.animator().alphaValue = 0
+        }, completionHandler: {
+            panel.orderOut(nil)
+        })
+    }
+
+    /// Undoes one learned term from the toast; the toast shrinks or disappears.
+    func removeLearnedTerm(_ term: String) {
+        removeVocabularyTerm(term)
+        learnedToastTerms.removeAll { $0 == term }
+        if learnedToastTerms.isEmpty {
+            dismissLearnedToast()
+        } else {
+            // Re-fit the panel after SwiftUI drops the removed row.
+            DispatchQueue.main.async { self.layoutLearnedToast() }
+        }
+    }
+
+    /// Sizes the panel to the card and pins it to the bottom-center of the
+    /// screen (same neighborhood as the live dictation overlay).
+    private func layoutLearnedToast() {
+        guard let panel = learnedToastWindow, let content = panel.contentView,
+              let screen = NSScreen.main else { return }
+        let size = content.fittingSize
+        let visible = screen.visibleFrame
+        let origin = NSPoint(
+            x: visible.midX - size.width / 2,
+            y: visible.minY + 48
+        )
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+    }
+
+    // MARK: Model selection
+
     // MARK: Model selection
 
     func selectTranscriptionBackend(_ id: String) {
         guard id != settings.transcriptionBackendID else { return }
         settings.transcriptionBackendID = id
         transcriptionBackendID = settings.transcriptionBackendID
+        normalizeLanguageForSelectedBackend()
         hotkey.stop()
         Task {
             await loadModel()
@@ -305,6 +453,12 @@ final class AppState: ObservableObject {
                 displayName: "Nemotron 0.6B — English (streaming, beta)",
                 backendID: TranscriptionBackend.nemotronEnglish.id,
                 variant: nil
+            ),
+            DictationModelOption(
+                id: TranscriptionBackend.indicConformer.id,
+                displayName: "AI4Bharat IndicConformer — Indic languages",
+                backendID: TranscriptionBackend.indicConformer.id,
+                variant: nil
             )
         ]
         for option in ModelCatalog.options {
@@ -322,6 +476,7 @@ final class AppState: ObservableObject {
         switch transcriptionBackend {
         case .fluidAudioEnglish: return TranscriptionBackend.fluidAudioEnglish.id
         case .nemotronEnglish: return TranscriptionBackend.nemotronEnglish.id
+        case .indicConformer: return TranscriptionBackend.indicConformer.id
         case .whisperKit: return "whisperKit:\(modelVariant)"
         }
     }
@@ -340,6 +495,7 @@ final class AppState: ObservableObject {
             settings.modelVariant = variant
             modelVariant = variant
         }
+        normalizeLanguageForSelectedBackend()
 
         hotkey.stop()
         Task {
@@ -458,6 +614,21 @@ final class AppState: ObservableObject {
     func hideLiveOverlay() {
         overlayWindow?.orderOut(nil)
         livePartialText = ""
+        audioLevel = 0
+        audioSpectrum = Array(repeating: 0, count: audioSpectrum.count)
+    }
+
+    /// Publishes the latest mic readings as raw targets. The smoothing that makes
+    /// the waveform buttery happens per-frame in the view (`WaveMotion`) at display
+    /// rate, so we deliberately don't pre-smooth here — that would only add lag and
+    /// blunt the amplitude's jump on a loud syllable.
+    private func applyAudioLevel(_ target: Double) {
+        audioLevel = min(1, max(0, target))
+    }
+
+    private func applySpectrum(_ bands: [Double]) {
+        guard !bands.isEmpty else { return }
+        audioSpectrum = bands
     }
 
     private func positionOverlay() {
@@ -518,6 +689,17 @@ final class AppState: ObservableObject {
         transcriptionBackend.supportsLanguageSelection
     }
 
+    var availableLanguages: [Language] {
+        switch transcriptionBackend {
+        case .fluidAudioEnglish, .nemotronEnglish:
+            return [.english]
+        case .indicConformer:
+            return Language.indicConformerLanguages
+        case .whisperKit:
+            return Language.whisperKitLanguages
+        }
+    }
+
     var modelDisplayName: String {
         if let backendModel = transcriptionBackend.modelDisplayName {
             return backendModel
@@ -529,6 +711,8 @@ final class AppState: ObservableObject {
         switch transcriptionBackend {
         case .fluidAudioEnglish, .nemotronEnglish:
             return "Download the English speech model"
+        case .indicConformer:
+            return "Prepare the AI4Bharat worker"
         case .whisperKit:
             return "Download the speech model"
         }
@@ -540,6 +724,8 @@ final class AppState: ObservableObject {
             return "A one-time FluidAudio Parakeet v3 download for fast, local dictation."
         case .nemotronEnglish:
             return "A one-time Nemotron 0.6B streaming model download (English). Prototype for evaluating streaming latency."
+        case .indicConformer:
+            return "Uses a local Python worker for AI4Bharat IndicConformer. Accept the gated Hugging Face model and install the Python dependencies first."
         case .whisperKit:
             return "A one-time download of the multilingual Whisper model. Supports English plus Hindi, Tamil, Malayalam, Kannada, Telugu, and more."
         }
@@ -551,6 +737,21 @@ final class AppState: ObservableObject {
 
     func isModelDownloaded(_ variant: String) -> Bool { modelManager.isDownloaded(variant) }
     func isSelectedModelDownloaded() -> Bool { modelManager.isSelectedModelDownloaded() }
+
+    private func normalizeLanguageForSelectedBackend() {
+        let current = Language.from(code: languageCode)
+        let fallback: Language
+        switch transcriptionBackend {
+        case .fluidAudioEnglish, .nemotronEnglish:
+            fallback = .english
+        case .indicConformer:
+            fallback = .hindi
+        case .whisperKit:
+            fallback = .auto
+        }
+        guard !availableLanguages.contains(current) else { return }
+        languageCode = fallback.code
+    }
 
     func keyName(_ code: Int) -> String {
         switch code {

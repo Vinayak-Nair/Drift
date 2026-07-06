@@ -45,14 +45,27 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         Picker("Language", selection: $state.languageCode) {
-                            ForEach(Language.all) { lang in Text(lang.displayName).tag(lang.code) }
+                            ForEach(state.availableLanguages) { lang in Text(lang.displayName).tag(lang.code) }
                         }
                         .labelsHidden()
                         note("Indian-language accuracy is best with the Large model; smaller models trade accuracy for speed.")
+                    } else if state.transcriptionBackend == .indicConformer {
+                        Picker("Language", selection: $state.languageCode) {
+                            ForEach(state.availableLanguages) { lang in Text(lang.displayName).tag(lang.code) }
+                        }
+                        .labelsHidden()
+                        Picker("Decoder", selection: $state.indicConformerDecoder) {
+                            Text("CTC").tag("ctc")
+                            Text("RNNT").tag("rnnt")
+                        }
+                        .labelsHidden()
+                        field("Python path", text: $state.indicConformerPythonPath)
+                        field("Model ID", text: $state.indicConformerModelID)
+                        note("Requires Python deps plus Hugging Face access to ai4bharat/indic-conformer-600m-multilingual.")
                     } else {
                         DetailLine(icon: "cpu", title: "Model", value: state.modelDisplayName)
                         DetailLine(icon: "globe", title: "Language", value: "English")
-                        note("FluidAudio uses Parakeet v3 for local dictation. Switch to WhisperKit for Indian-language transcription.")
+                        note("FluidAudio uses Parakeet v3 for local dictation. Switch models for multilingual or Indic-language transcription.")
                     }
                 }
 
@@ -78,6 +91,25 @@ struct SettingsView: View {
                     default:
                         note("Fast, private formatting on your Mac. No setup, no network.")
                     }
+                }
+
+                Card {
+                    SectionLabel("Vocabulary", systemImage: "character.book.closed.fill")
+                    TextEditor(text: $state.customVocabularyRaw)
+                        .font(.callout)
+                        .foregroundStyle(Ink.text(0.9))
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .frame(height: 96)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(.white.opacity(0.045))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(.white.opacity(0.08))
+                        )
+                    note("Names and terms Drift keeps mishearing, one per line. They guide transcription and cleanup.")
                 }
 
                 Card {

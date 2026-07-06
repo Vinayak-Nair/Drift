@@ -5,16 +5,18 @@ struct DashboardView: View {
     @EnvironmentObject var state: AppState
     @State private var appeared = false
     @State private var query = ""
-    @State private var section: Section = .today
+    @State private var section: Section = .home
+    @State private var newTerm = ""
 
     enum Section: String, CaseIterable, Identifiable {
-        case today = "Today", history = "History", apps = "Apps", settings = "Settings"
+        case home = "Home", history = "History", apps = "Apps", dictionary = "Dictionary", settings = "Settings"
         var id: String { rawValue }
         var icon: String {
             switch self {
-            case .today: return "checkmark"
+            case .home: return "house.fill"
             case .history: return "clock.arrow.circlepath"
             case .apps: return "square.grid.2x2.fill"
+            case .dictionary: return "character.book.closed.fill"
             case .settings: return "slider.horizontal.3"
             }
         }
@@ -38,23 +40,23 @@ struct DashboardView: View {
             }
         }
         .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 6)
         .frame(minWidth: 940, minHeight: 720)
         .background(GF.pageBG.ignoresSafeArea())
         .tint(GF.accent)
         .preferredColorScheme(.light)
-        .onAppear { withAnimation(.smooth(duration: 0.5)) { appeared = true } }
+        .onAppear { withAnimation(.easeOut(duration: 0.3)) { appeared = true } }
     }
 
     // MARK: Top bar
 
     private var topBar: some View {
         ZStack {
-            HStack(spacing: 7) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(GF.accentGradient)
+            HStack(spacing: 9) {
+                Image("BrandMark")
+                    .resizable().scaledToFit().frame(height: 22)
                 Text("drift")
-                    .font(.system(size: 21, weight: .bold, design: .rounded)).tracking(-0.3)
+                    .font(.system(size: 21, weight: .medium, design: .rounded)).tracking(-0.3)
                     .foregroundStyle(GF.ink)
             }
             HStack {
@@ -88,66 +90,76 @@ struct DashboardView: View {
 
     @ViewBuilder private var mainContent: some View {
         switch section {
-        case .today: todayView
+        case .home: homeView
         case .history: historyView
         case .apps: appsView
+        case .dictionary: dictionaryView
         case .settings: settingsView
         }
     }
 
-    private var todayView: some View {
+    private var homeView: some View {
         let stats = DashboardStats(state.transcriptHistory)
         return VStack(spacing: 24) {
             HeroCard(stats: stats, keyName: state.keyName(state.settings.pttKeyCode))
-            tasksSection
+            activityCard(stats)
+            recentSection
         }
     }
 
-    private var tasksSection: some View {
-        VStack(spacing: 18) {
-            VStack(spacing: 9) {
-                Text("Get more from Drift")
-                    .font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(GF.ink)
-                HStack(spacing: 8) {
-                    ZStack {
-                        Circle().fill(GF.accentSoft).frame(width: 26, height: 26)
-                        Image(systemName: "sparkles").font(.system(size: 11, weight: .bold)).foregroundStyle(GF.accent)
-                    }
-                    Text("A few quick wins to dictate faster")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(GF.inkSecondary)
+    /// The latest dictations, surfaced on Home so the most recent transcripts are a
+    /// click away to copy or reuse. "See all" opens the full History tab.
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Recent dictations")
+                    .font(.system(size: 17, weight: .bold, design: .rounded)).foregroundStyle(GF.ink)
+                Spacer()
+                if state.transcriptHistory.count > 3 {
+                    Button { withAnimation(.snappy(duration: 0.25)) { section = .history } } label: {
+                        HStack(spacing: 3) { Text("See all"); Image(systemName: "arrow.right") }
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(GF.accent)
+                    }.buttonStyle(.plain)
                 }
             }
-            .padding(.top, 30)
-
-            VStack(spacing: 14) {
-                TaskCard(
-                    tint: GF.pastelTeal, icon: "command", badge: "command",
-                    title: "Speak punctuation and edits, hands-free",
-                    cta: state.commandModeEnabled ? "Command mode is on" : "Turn on Command mode",
-                    done: state.commandModeEnabled
-                ) { withAnimation(.snappy) { section = .apps } }
-
-                TaskCard(
-                    tint: GF.pastelBlue, icon: "square.grid.2x2.fill", badge: "wand.and.stars",
-                    title: "Match your writing to each app automatically",
-                    cta: "Set up per-app formatting",
-                    done: !state.recentTargetApps.isEmpty
-                ) { withAnimation(.snappy) { section = .apps } }
-
-                TaskCard(
-                    tint: GF.pastelGreen, icon: "cpu", badge: "checkmark",
-                    title: "Pick the model that fits your voice",
-                    cta: "Choose your model", done: false
-                ) { withAnimation(.snappy) { section = .settings } }
+            if state.transcriptHistory.isEmpty {
+                LightCard {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle().fill(GF.accentSoft).frame(width: 44, height: 44)
+                            Image(systemName: "waveform").font(.system(size: 17, weight: .medium)).foregroundStyle(GF.accent)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("No dictations yet").font(.callout.weight(.semibold)).foregroundStyle(GF.ink)
+                            Text("Hold \(state.keyName(state.settings.pttKeyCode)) and speak to get started.")
+                                .font(.caption).foregroundStyle(GF.inkSecondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            } else {
+                ForEach(state.transcriptHistory.prefix(3)) { entry in
+                    LightTranscriptRow(entry: entry) { state.copyTranscript(entry) }
+                }
             }
-            .padding(.horizontal, 22)
-            .padding(.bottom, 30)
         }
-        .frame(maxWidth: .infinity)
-        .background(
-            UnevenRoundedRectangle(topLeadingRadius: 36, bottomLeadingRadius: 24, bottomTrailingRadius: 24, topTrailingRadius: 36, style: .continuous)
-                .fill(GF.sectionBG)
-        )
+    }
+
+    /// A GitHub-style heatmap of dictation activity: the home page's centerpiece.
+    private func activityCard(_ stats: DashboardStats) -> some View {
+        LightCard {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Activity").font(.callout.weight(.semibold)).foregroundStyle(GF.ink)
+                    Text("\(stats.total) total · \(stats.week) this week")
+                        .font(.caption).foregroundStyle(GF.inkSecondary)
+                }
+                Spacer()
+                if stats.streak > 0 { StreakChip(days: stats.streak) }
+            }
+            ContributionGraph(entries: state.transcriptHistory)
+            HStack { Spacer(); ActivityLegend() }
+        }
     }
 
     // MARK: History
@@ -250,6 +262,92 @@ struct DashboardView: View {
         .animation(.smooth(duration: 0.25), value: state.commandModeEnabled)
     }
 
+    // MARK: Dictionary
+
+    private var dictionaryView: some View {
+        let terms = Vocabulary.parse(state.customVocabularyRaw)
+        return VStack(alignment: .leading, spacing: 18) {
+            Text("Dictionary").font(.system(size: 24, weight: .bold, design: .rounded)).foregroundStyle(GF.ink)
+
+            LightCard {
+                HStack {
+                    Text("Names & terms").font(.callout.weight(.semibold)).foregroundStyle(GF.ink)
+                    Spacer()
+                    if !terms.isEmpty {
+                        Text("\(terms.count) \(terms.count == 1 ? "term" : "terms")")
+                            .font(.caption.weight(.semibold)).foregroundStyle(GF.accent)
+                            .padding(.horizontal, 9).padding(.vertical, 3)
+                            .background(Capsule().fill(GF.accentSoft))
+                    }
+                }
+                Text("Words Drift keeps mishearing: people, places, brands.")
+                    .font(.caption).foregroundStyle(GF.inkSecondary)
+
+                HStack(spacing: 8) {
+                    TextField("Add a name or term", text: $newTerm)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(GF.sectionBG))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(GF.cardBorder, lineWidth: 1))
+                        .onSubmit(addTerm)
+                    Button(action: addTerm) {
+                        Label("Add", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+
+                if !terms.isEmpty {
+                    FlowLayout(spacing: 8) {
+                        ForEach(terms, id: \.self) { term in
+                            TermChip(term: term) { removeTerm(term) }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+            }
+
+            LightCard {
+                Text("How it works").font(.callout.weight(.semibold)).foregroundStyle(GF.ink)
+                dictionaryPoint(icon: "waveform", text: "Whisper is nudged toward these spellings while it listens.")
+                dictionaryPoint(icon: "ear", text: "Close mishears are fixed on your Mac: \u{201C}current johar\u{201D} becomes \u{201C}Karan Johar\u{201D}.")
+                dictionaryPoint(icon: "wand.and.stars", text: "AI cleanup providers can restore even badly garbled terms.")
+                dictionaryPoint(icon: "sparkles", text: "Fix a word right after dictating and Drift learns it automatically.")
+            }
+        }
+    }
+
+    /// Appends the typed term to the stored vocabulary (newline-separated raw
+    /// string shared with DriftKit). Case-insensitive duplicates are ignored.
+    private func addTerm() {
+        let term = newTerm.trimmingCharacters(in: .whitespaces)
+        guard !term.isEmpty else { return }
+        newTerm = ""
+        let existing = Vocabulary.parse(state.customVocabularyRaw)
+        guard !existing.contains(where: { $0.lowercased() == term.lowercased() }) else { return }
+        withAnimation(.snappy(duration: 0.2)) {
+            state.customVocabularyRaw = (existing + [term]).joined(separator: "\n")
+        }
+    }
+
+    private func removeTerm(_ term: String) {
+        let remaining = Vocabulary.parse(state.customVocabularyRaw).filter { $0 != term }
+        withAnimation(.snappy(duration: 0.2)) {
+            state.customVocabularyRaw = remaining.joined(separator: "\n")
+        }
+    }
+
+    private func dictionaryPoint(icon: String, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(GF.accent)
+                .frame(width: 18)
+            Text(text).font(.caption).foregroundStyle(GF.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     // MARK: Settings
 
     private var settingsView: some View {
@@ -273,9 +371,9 @@ struct DashboardView: View {
                 Picker("Model", selection: Binding(get: { state.selectedDictationModelID }, set: { state.selectDictationModel($0) })) {
                     ForEach(state.dictationModelOptions) { o in Text(o.displayName).tag(o.id) }
                 }.labelsHidden()
-                if state.transcriptionBackend == .whisperKit {
+                if state.supportsLanguageSelection {
                     Picker("Language", selection: $state.languageCode) {
-                        ForEach(Language.all) { l in Text(l.displayName).tag(l.code) }
+                        ForEach(state.availableLanguages) { l in Text(l.displayName).tag(l.code) }
                     }.labelsHidden()
                 } else {
                     LightDetail(title: "Language", value: state.languageDisplayName)
@@ -307,6 +405,7 @@ private enum GF {
     static let cardBG = Color.white
     static let hairline = Color.black.opacity(0.06)
     static let cardBorder = Color.black.opacity(0.06)
+    static let gridEmpty = Color(red: 0.90, green: 0.92, blue: 0.94)
 
     static let ink = Color(red: 0.105, green: 0.12, blue: 0.15)
     static let inkSecondary = Color(red: 0.42, green: 0.46, blue: 0.51)
@@ -456,49 +555,196 @@ private struct HeroPill: View {
     }
 }
 
-// MARK: - Task card
+// MARK: - Contribution graph
 
-private struct TaskCard: View {
-    let tint: Color
-    let icon: String
-    let badge: String
-    let title: String
-    let cta: String
-    let done: Bool
-    let action: () -> Void
-    @State private var hovering = false
+/// A GitHub-style activity heatmap: one cell per day, brightening with the number
+/// of dictations that day. Cells are a fixed size; the number of week-columns is
+/// derived from the available width so the grid always fills the card.
+private struct ContributionGraph: View {
+    let entries: [TranscriptEntry]
+
+    private let cell: CGFloat = 13
+    private let gap: CGFloat = 3
+    private let weekdayLabelWidth: CGFloat = 28
+    private let monthRowHeight: CGFloat = 15
+
+    private var gridHeight: CGFloat { cell * 7 + gap * 6 }
+    private var totalHeight: CGFloat { monthRowHeight + 6 + gridHeight }
+
+    private struct DayCell: Identifiable { let id = UUID(); let date: Date; let count: Int; let isFuture: Bool }
+    private struct Column: Identifiable { let id: Int; let days: [DayCell] }
+    private struct MonthMark: Identifiable { let id = UUID(); let col: Int; let text: String }
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                ZStack(alignment: .topTrailing) {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous).fill(tint).frame(width: 76, height: 76)
-                    Image(systemName: icon).font(.system(size: 30, weight: .medium)).foregroundStyle(Color.black.opacity(0.22))
-                        .frame(width: 76, height: 76)
-                    Circle().fill(GF.accentGradient).frame(width: 26, height: 26)
-                        .overlay(Image(systemName: badge).font(.system(size: 11, weight: .bold)).foregroundStyle(.white))
-                        .offset(x: 6, y: -6)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title).font(.system(size: 17, weight: .bold)).foregroundStyle(GF.ink)
-                        .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 5) {
-                        if done { Image(systemName: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(GF.accent) }
-                        Text(cta).font(.system(size: 14, weight: .medium)).foregroundStyle(done ? GF.accent : GF.inkSecondary)
-                        if !done { Image(systemName: "arrow.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(GF.inkSecondary) }
+        GeometryReader { geo in
+            let weeks = weekCount(for: geo.size.width)
+            let cal = Calendar.current
+            let columns = buildColumns(weeks: weeks, cal: cal, counts: dailyCounts(cal: cal))
+            VStack(alignment: .leading, spacing: 6) {
+                monthHeader(columns)
+                HStack(spacing: gap) {
+                    weekdayColumn
+                    HStack(spacing: gap) {
+                        ForEach(columns) { col in
+                            VStack(spacing: gap) {
+                                ForEach(col.days) { cellView($0) }
+                            }
+                        }
                     }
                 }
-                Spacer(minLength: 0)
             }
-            .padding(16)
-            .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(GF.cardBG))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(GF.cardBorder, lineWidth: 1))
-            .shadow(color: .black.opacity(hovering ? 0.08 : 0.04), radius: hovering ? 12 : 6, y: hovering ? 4 : 2)
-            .offset(y: hovering ? -2 : 0)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.18), value: hovering)
+        .frame(height: totalHeight)
+    }
+
+    private func cellView(_ day: DayCell) -> some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(day.isFuture ? Color.clear : activityColor(activityLevel(day.count)))
+            .frame(width: cell, height: cell)
+            .overlay(
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .strokeBorder(Color.black.opacity(day.isFuture ? 0 : 0.04), lineWidth: 1)
+            )
+            .help(day.isFuture ? "" : "\(day.count) \(day.count == 1 ? "dictation" : "dictations") · \(day.date.formatted(date: .abbreviated, time: .omitted))")
+    }
+
+    private var weekdayColumn: some View {
+        VStack(spacing: gap) {
+            ForEach(0..<7, id: \.self) { row in
+                Text(weekdayLabel(row))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(GF.inkTertiary)
+                    .frame(height: cell)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .frame(width: weekdayLabelWidth)
+    }
+
+    private func monthHeader(_ columns: [Column]) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(monthMarks(columns)) { mark in
+                Text(mark.text)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(GF.inkTertiary)
+                    .offset(x: CGFloat(mark.col) * (cell + gap))
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: monthRowHeight, maxHeight: monthRowHeight, alignment: .topLeading)
+        .padding(.leading, weekdayLabelWidth + gap)
+    }
+
+    // MARK: Data
+
+    private func weekCount(for width: CGFloat) -> Int {
+        let usable = width - weekdayLabelWidth - gap
+        let n = Int(((usable + gap) / (cell + gap)).rounded(.down))
+        return max(6, min(53, n))
+    }
+
+    private func dailyCounts(cal: Calendar) -> [Date: Int] {
+        var counts: [Date: Int] = [:]
+        for entry in entries {
+            counts[cal.startOfDay(for: entry.createdAt), default: 0] += 1
+        }
+        return counts
+    }
+
+    private func buildColumns(weeks: Int, cal: Calendar, counts: [Date: Int]) -> [Column] {
+        let today = cal.startOfDay(for: Date())
+        let weekdayIndex = cal.component(.weekday, from: today) - 1 // 0 = Sunday
+        let startOfThisWeek = cal.date(byAdding: .day, value: -weekdayIndex, to: today)!
+        let firstColumnStart = cal.date(byAdding: .day, value: -7 * (weeks - 1), to: startOfThisWeek)!
+
+        return (0..<weeks).map { c in
+            let days = (0..<7).map { r -> DayCell in
+                let date = cal.date(byAdding: .day, value: c * 7 + r, to: firstColumnStart)!
+                return DayCell(date: date, count: counts[date] ?? 0, isFuture: date > today)
+            }
+            return Column(id: c, days: days)
+        }
+    }
+
+    /// One label per month, above the first column of that month, skipping any
+    /// that would crowd the previous label.
+    private func monthMarks(_ columns: [Column]) -> [MonthMark] {
+        let cal = Calendar.current
+        var marks: [MonthMark] = []
+        var lastMonth = -1
+        var lastCol = -10
+        for (i, col) in columns.enumerated() {
+            let m = cal.component(.month, from: col.days[0].date)
+            guard m != lastMonth else { continue }
+            lastMonth = m
+            if i == 0 || i - lastCol >= 2 {
+                marks.append(MonthMark(col: i, text: col.days[0].date.formatted(.dateTime.month(.abbreviated))))
+                lastCol = i
+            }
+        }
+        return marks
+    }
+
+    private func weekdayLabel(_ row: Int) -> String {
+        switch row {
+        case 1: return "Mon"
+        case 3: return "Wed"
+        case 5: return "Fri"
+        default: return ""
+        }
+    }
+}
+
+/// The "Less → More" key beneath the contribution graph.
+private struct ActivityLegend: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Text("Less").font(.system(size: 10)).foregroundStyle(GF.inkTertiary)
+            ForEach(0..<5, id: \.self) { level in
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(activityColor(level))
+                    .frame(width: 11, height: 11)
+                    .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).strokeBorder(Color.black.opacity(0.04), lineWidth: 1))
+            }
+            Text("More").font(.system(size: 10)).foregroundStyle(GF.inkTertiary)
+        }
+    }
+}
+
+/// A small "N day streak" chip shown beside the activity header.
+private struct StreakChip: View {
+    let days: Int
+    private let amber = Color(red: 0.95, green: 0.6, blue: 0.2)
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "flame.fill").font(.system(size: 11, weight: .bold))
+            Text("\(days) day streak").font(.caption.weight(.semibold))
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Capsule().fill(amber.opacity(0.14)))
+        .foregroundStyle(amber)
+    }
+}
+
+/// Buckets a day's dictation count into one of five intensity levels.
+private func activityLevel(_ count: Int) -> Int {
+    switch count {
+    case 0: return 0
+    case 1: return 1
+    case 2...3: return 2
+    case 4...6: return 3
+    default: return 4
+    }
+}
+
+/// The green ramp for the heatmap: a faint slot when idle, deepening to full brand
+/// green at the top of the scale.
+private func activityColor(_ level: Int) -> Color {
+    switch level {
+    case 0: return GF.gridEmpty
+    case 1: return GF.accent.opacity(0.3)
+    case 2: return GF.accent.opacity(0.55)
+    case 3: return GF.accent.opacity(0.8)
+    default: return GF.accent
     }
 }
 
@@ -513,6 +759,65 @@ private struct LightCard<Content: View>: View {
             .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(GF.cardBG))
             .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(GF.cardBorder, lineWidth: 1))
             .shadow(color: .black.opacity(0.04), radius: 8, y: 3)
+    }
+}
+
+/// A dictionary term rendered as a removable pill.
+private struct TermChip: View {
+    let term: String
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(term).font(.system(size: 13, weight: .medium)).foregroundStyle(GF.ink)
+            Button(action: onDelete) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(hovering ? GF.ink : GF.inkTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(Capsule().fill(hovering ? GF.gridEmpty : GF.sectionBG))
+        .overlay(Capsule().strokeBorder(GF.cardBorder, lineWidth: 1))
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Left-aligned wrapping layout for the term chips.
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return CGSize(width: maxWidth == .infinity ? max(x - spacing, 0) : maxWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
     }
 }
 

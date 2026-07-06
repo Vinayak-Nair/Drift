@@ -21,7 +21,10 @@ let package = Package(
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
-            path: "Sources/DriftKit"
+            path: "Sources/DriftKit",
+            resources: [
+                .process("Resources")
+            ]
         ),
         .testTarget(
             name: "DriftKitTests",

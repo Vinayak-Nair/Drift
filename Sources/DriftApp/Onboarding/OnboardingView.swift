@@ -6,6 +6,9 @@ import DriftKit
 struct OnboardingView: View {
     @EnvironmentObject var state: AppState
     private let permissionTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// Onboarding is two pages: permission setup, then a one-time "quick wins"
+    /// step. After this the same options live only in the dashboard's Settings.
+    @State private var showQuickWins = false
 
     private var downloadFraction: Double? {
         if case .downloadingModel(let p) = state.status { return p }
@@ -15,6 +18,30 @@ struct OnboardingView: View {
     private var modelDownloaded: Bool { state.isSelectedModelDownloaded() }
 
     var body: some View {
+        ZStack {
+            if showQuickWins {
+                quickWinsContent
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .opacity))
+            } else {
+                setupContent
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .leading).combined(with: .opacity),
+                        removal: .opacity))
+            }
+        }
+        .frame(width: 520, height: 620)
+        .background(InkCanvas().ignoresSafeArea())
+        .tint(Ink.accentSolid)
+        .preferredColorScheme(.dark)
+        .animation(.snappy(duration: 0.3), value: showQuickWins)
+        .onReceive(permissionTimer) { _ in state.refreshPermissions() }
+    }
+
+    // MARK: Page 1 — permission setup
+
+    private var setupContent: some View {
         VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 16) {
                 AuraOrb(diameter: 60, recording: false, busy: false)
@@ -48,19 +75,59 @@ struct OnboardingView: View {
                 Button("Re-check") { state.refreshPermissions() }
                     .buttonStyle(.plain).font(.callout).foregroundStyle(Ink.text(0.6))
                 Spacer()
-                SoftButton(title: "Start Using Drift", systemImage: "arrow.right", prominent: true) {
-                    state.finishOnboarding()
+                SoftButton(title: "Continue", systemImage: "arrow.right", prominent: true) {
+                    withAnimation(.snappy(duration: 0.3)) { showQuickWins = true }
                 }
                 .disabled(!state.allPermissionsAndModelReady)
                 .opacity(state.allPermissionsAndModelReady ? 1 : 0.5)
             }
         }
         .padding(28)
-        .frame(width: 520, height: 620)
-        .background(InkCanvas().ignoresSafeArea())
-        .tint(Ink.accentSolid)
-        .preferredColorScheme(.dark)
-        .onReceive(permissionTimer) { _ in state.refreshPermissions() }
+    }
+
+    // MARK: Page 2 — quick wins (first-run only)
+
+    private var quickWinsContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 16) {
+                ZStack {
+                    Circle().fill(Ink.green.opacity(0.16)).frame(width: 60, height: 60)
+                    Image(systemName: "checkmark").font(.system(size: 26, weight: .bold)).foregroundStyle(Ink.green)
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("You're all set")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("A few quick wins to dictate faster. Turn these on now, or find them later in Settings.")
+                        .font(.callout)
+                        .foregroundStyle(Ink.text(0.55))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(spacing: 10) {
+                TipRow(icon: "command", title: "Speak punctuation and edits, hands-free",
+                       subtitle: "Say “new line”, “period”, or “scratch that”.",
+                       toggle: $state.commandModeEnabled)
+                TipRow(icon: "wand.and.stars", title: "Match your writing to each app",
+                       subtitle: "Drift adapts its style to the app you dictate into.",
+                       toggle: $state.perAppProfilesEnabled)
+                TipRow(icon: "cpu", title: "Pick the model that fits your voice",
+                       subtitle: "Switch speech models anytime in Settings.")
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Button("Back") { withAnimation(.snappy(duration: 0.3)) { showQuickWins = false } }
+                    .buttonStyle(.plain).font(.callout).foregroundStyle(Ink.text(0.6))
+                Spacer()
+                SoftButton(title: "Start dictating", systemImage: "arrow.right", prominent: true) {
+                    state.finishOnboarding()
+                }
+            }
+        }
+        .padding(28)
     }
 
     private var modelStep: some View {
@@ -115,6 +182,40 @@ private struct StepCard<Content: View>: View {
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.04)))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(done ? Ink.green.opacity(0.3) : .white.opacity(0.08), lineWidth: 1))
+    }
+}
+
+/// A recommended-setup row on the final onboarding page: an icon, a short pitch,
+/// and an optional inline toggle. Rows without a toggle just point to Settings.
+private struct TipRow: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    var toggle: Binding<Bool>? = nil
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Ink.accentSolid.opacity(0.14))
+                    .frame(width: 44, height: 44)
+                Image(systemName: icon).font(.system(size: 18, weight: .medium)).foregroundStyle(Ink.accentSolid)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(subtitle).font(.caption).foregroundStyle(Ink.text(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if let toggle {
+                Toggle("", isOn: toggle).labelsHidden().toggleStyle(.switch).controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 1))
     }
 }
 

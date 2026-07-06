@@ -24,7 +24,7 @@ struct DriftMenu: View {
 
         if state.supportsLanguageSelection {
             Menu("Language") {
-                ForEach(Language.all) { lang in
+                ForEach(state.availableLanguages) { lang in
                     Button {
                         state.languageCode = lang.code
                     } label: {
